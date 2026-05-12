@@ -5,6 +5,7 @@ import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
+import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
 import io.runcycles.client.java.springai.tool.CyclesToolGate;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
@@ -141,5 +142,23 @@ public class CyclesSpringAiAutoConfiguration {
                                          CyclesProperties cyclesProperties,
                                          CyclesSpringAiProperties springAiProperties) {
         return new CyclesToolGate(cyclesClient, cyclesProperties, springAiProperties);
+    }
+
+    /**
+     * Cycles-aware observation convention bean for chat-client traces. Adds
+     * low-cardinality attribution tags (tenant, workspace, app, action kind/name)
+     * to Spring AI ChatClient observations. NOT auto-attached to ChatClient.Builder —
+     * applying it is a user decision (cross-cutting trace visibility).
+     *
+     * @param cyclesProperties   SDK-level configuration.
+     * @param springAiProperties Spring AI integration configuration.
+     * @return the convention bean.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public CyclesChatClientObservationConvention cyclesChatClientObservationConvention(
+            CyclesProperties cyclesProperties,
+            CyclesSpringAiProperties springAiProperties) {
+        return new CyclesChatClientObservationConvention(cyclesProperties, springAiProperties);
     }
 }

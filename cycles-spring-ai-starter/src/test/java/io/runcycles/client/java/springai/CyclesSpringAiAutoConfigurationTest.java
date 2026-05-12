@@ -6,6 +6,7 @@ import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiAutoConfiguration;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.ai.chat.client.ChatClient;
@@ -40,6 +41,7 @@ class CyclesSpringAiAutoConfigurationTest {
             assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
             assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
             assertThat(ctx).hasSingleBean(ChatClientCustomizer.class);
+            assertThat(ctx).hasSingleBean(CyclesChatClientObservationConvention.class);
             CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
             assertThat(props.isEnabled()).isTrue();
         });

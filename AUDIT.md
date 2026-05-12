@@ -19,7 +19,10 @@ The Spring AI starter does not own its own protocol — it delegates to the Cycl
 | Configuration properties | `io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties` (prefix: `cycles.spring-ai`) | API stable |
 | Budget advisor (non-streaming) | `io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor` | API stable; behavior may extend (e.g. per-call estimates) without breaking existing callers |
 | Budget advisor (streaming) | `io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor` | **Added in 0.2.0-SNAPSHOT.** Mirrors the call advisor's lifecycle for `ChatClient.stream()` invocations |
-| Lifecycle helper | `io.runcycles.client.java.springai.advisor.CyclesBudgetLifecycle` (package-private) | Internal — shared reserve / commit / release plumbing |
+| Lifecycle helper | `io.runcycles.client.java.springai.advisor.CyclesBudgetLifecycle` | **Promoted to public in 0.2.0-SNAPSHOT** (internal-API marker in javadoc) so the new tool package can reuse the reserve / commit / release plumbing |
+| Tool callback decorator | `io.runcycles.client.java.springai.tool.CyclesToolCallback` | **Added in 0.2.0-SNAPSHOT.** Spring AI `ToolCallback` wrapper that reserves / commits / releases per tool invocation; reports `tool.call` / `spring-ai-tool:<name>` action labels (configurable) |
+| Tool gate factory | `io.runcycles.client.java.springai.tool.CyclesToolGate` | **Added in 0.2.0-SNAPSHOT.** Auto-configured factory: users call `cyclesToolGate.wrap(myTool)` to opt in to per-tool gating. Not auto-applied to tools |
+| Observation convention | `io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention` | **Added in 0.2.0-SNAPSHOT.** Extends Spring AI's `DefaultChatClientObservationConvention` to append low-cardinality `cycles.*` attribution tags to chat-client traces. Auto-configured as a bean but not auto-attached — users apply via `chatClientBuilder.observationConvention(...)` |
 | Denial exception | `io.runcycles.client.java.springai.CyclesBudgetDeniedException` | API stable |
 
 ## Property keys (v0.1.0)
@@ -34,6 +37,9 @@ The Spring AI starter does not own its own protocol — it delegates to the Cycl
 | `cycles.spring-ai.fail-open` | boolean | `false` | When `true`, transport / unexpected errors are logged and the call proceeds. Budget denials (`DENY` decision) are always surfaced regardless. |
 | `cycles.spring-ai.input-cost-per-token` | long | `0` | **Added in 0.2.0-SNAPSHOT.** Per-input-token cost in the configured estimate unit. When > 0 (or `output-cost-per-token` > 0), enables real-token-based actual accounting at commit time. Rejected as IllegalArgumentException at binding when negative. |
 | `cycles.spring-ai.output-cost-per-token` | long | `0` | **Added in 0.2.0-SNAPSHOT.** Per-output-token cost in the configured estimate unit. Same validation as the input rate. |
+| `cycles.spring-ai.estimate-from-prompt` | boolean | `false` | **Added in 0.2.0-SNAPSHOT.** When `true` and `input-cost-per-token` and/or `output-cost-per-token` is > 0, pre-call reservation is sized from prompt char count (`chars / 4` token approximation × combined rate). Falls back to `default-estimate` when prompt is empty or rates are zero. |
+| `cycles.spring-ai.tool-action-kind` | string | `tool.call` | **Added in 0.2.0-SNAPSHOT.** Action.kind label reported to Cycles for `CyclesToolCallback`-wrapped tool invocations (distinct from chat's `action-kind`). |
+| `cycles.spring-ai.tool-action-name-prefix` | string | `spring-ai-tool:` | **Added in 0.2.0-SNAPSHOT.** Prefix prepended to the wrapped tool's name to produce the action.name label (e.g. `spring-ai-tool:get_weather`). |
 
 ## Auto-configuration conditions
 

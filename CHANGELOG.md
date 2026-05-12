@@ -30,8 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tool-level budget gating via `CyclesToolCallback`.** New wrapper class around Spring AI `ToolCallback` that reserves before each tool invocation, commits on success, releases on exception. Action labels reported separately from chat: `cycles.spring-ai.tool-action-kind` (default `tool.call`) and `cycles.spring-ai.tool-action-name-prefix` (default `spring-ai-tool:`, the wrapped tool's name is appended). Auto-configured `CyclesToolGate` factory bean — users opt in by calling `cyclesToolGate.wrap(myTool)` where they construct their tools.
 - **`CyclesBudgetLifecycle`** promoted from package-private to public (internal API marker via javadoc) to support the tool package. Methods on the lifecycle now accept explicit action-kind / action-name labels so tool reservations are distinguishable from chat reservations in audit history.
 
-### Still pending for v0.2
-- `ObservationConvention` (richer audit-trail attribution).
+### Added (continued)
+- **`CyclesChatClientObservationConvention`** — Spring AI `ChatClientObservationConvention` that extends `DefaultChatClientObservationConvention` and appends low-cardinality Cycles attribution tags to every chat-client trace: `cycles.tenant`, `cycles.workspace`, `cycles.app`, `cycles.action_kind`, `cycles.action_name`. Auto-configured as a bean but **not auto-attached** to the ChatClient.Builder — applying it is a user opt-in via `builder.observationConvention(cyclesConvention)` so trace visibility remains a deliberate choice rather than a default. Per-call high-cardinality identifiers (reservation IDs) are intentionally excluded; they can be added in a future release if there's demand for trace ↔ reservation correlation. Null SDK properties (tenant/workspace/app) are substituted as `unknown` to satisfy Micrometer's KeyValues non-null contract.
+
+### v0.2 status
+All v0.1.0 known-limitations have been addressed on this branch. Pending: documentation polish and a release decision.
 
 ## [0.1.0] — 2026-05-12
 

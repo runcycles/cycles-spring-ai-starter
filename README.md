@@ -92,14 +92,15 @@ The advisor is registered automatically via Spring AI's `ChatClientCustomizer` m
 
 These are *deliberate* deferrals to a future release, not accidents:
 
-- **Estimate is a fixed constant.** Every call reserves `cycles.spring-ai.default-estimate` units. A future release will derive a per-call estimate from prompt token count + model pricing.
-- **No `ToolCallback` decoration.** Action-authority gates on tool calls are in the v0.2 roadmap.
-- **No `ObservationConvention`.** Richer audit-trail attribution beyond the reservation lifecycle is in the v0.2 roadmap.
+_(All known limitations from v0.1.0 have been addressed in `0.2.0-SNAPSHOT` — see the "Already addressed" list below.)_
 
 ### Already addressed in `0.2.0-SNAPSHOT` (post-v0.1.0)
 
 - ✅ **Streaming chat gating.** `CyclesBudgetStreamAdvisor` mirrors the lifecycle of the non-streaming advisor for `chatClient.prompt(...).stream()` invocations. Reserves before subscribing; commits on stream complete; releases on error or subscriber cancellation. Both advisors are auto-attached to the auto-configured `ChatClient.Builder`.
 - ✅ **Real `ChatResponse.Usage` extraction on commit** — when the LLM provider returns usage and either `input-cost-per-token` / `output-cost-per-token` are configured (or `estimate-unit=TOKENS`), the advisor commits the actual cost computed from tokens rather than the estimate. Falls back to estimate-as-actual when usage data is missing. Applies to both the call and stream advisors (the stream advisor uses the last chunk that carried usage).
+- ✅ **Prompt-based per-call estimate.** When `cycles.spring-ai.estimate-from-prompt=true` and one of the cost-per-token rates is configured, the pre-call reservation is sized from the prompt's character count (chars / 4 → tokens) rather than the fixed `default-estimate`. Falls back to `default-estimate` when the prompt is empty or rates are zero.
+- ✅ **`ToolCallback` decoration.** `CyclesToolCallback` wraps any Spring AI `ToolCallback` with the same reserve / commit / release lifecycle. Users opt in via the auto-configured `CyclesToolGate.wrap(...)` factory. Tool reservations report distinct `tool.call` / `spring-ai-tool:<name>` action labels so they're separable from chat reservations in audit history.
+- ✅ **`ObservationConvention` for chat-client traces.** `CyclesChatClientObservationConvention` extends Spring AI's default convention and appends low-cardinality Cycles attribution tags (`cycles.tenant`, `cycles.workspace`, `cycles.app`, `cycles.action_kind`, `cycles.action_name`) to every chat-client observation. Auto-configured as a bean but NOT auto-attached — users apply it explicitly via `chatClientBuilder.observationConvention(cyclesConvention)`.
 
 ## Configuration reference
 
