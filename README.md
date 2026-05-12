@@ -113,11 +113,82 @@ Connection + subject properties (`cycles.base-url`, `cycles.api-key`, `cycles.te
 
 ## Relationship to cycles-spring-boot-starter
 
-| If your app uses... | Depend on |
+The two Java integrations are **complementary, not competing** — they target different layers of the same problem. This starter actually *depends on* `cycles-spring-boot-starter` and reuses its `CyclesClient`, `CyclesProperties`, and connection plumbing.
+
+### What each one is
+
+| Aspect | [`cycles-spring-boot-starter`](https://github.com/runcycles/cycles-spring-boot-starter) | `cycles-spring-ai-starter` (this repo) |
+|---|---|---|
+| Maven artifact | `io.runcycles:cycles-client-java-spring` | `io.runcycles:cycles-spring-ai-starter` |
+| Integration mechanism | Spring AOP via `@Cycles` annotation | Spring AI `CallAdvisor` + `ChatClientCustomizer` |
+| Where it intercepts | Any Java method you annotate | Every `chatClient.prompt(...).call()` invocation |
+| Granularity | Method-level, explicit opt-in | Framework-level, transparent |
+| Call-site changes | Yes — annotate methods with `@Cycles` | No — wired automatically |
+| Estimate computation | SpEL: `@Cycles("#tokens * 10")` (dynamic per-call) | Fixed constant from properties (v0.1.0) |
+| Subject routing | SpEL: can pull tenant from method args | Constant from `cycles.tenant/workspace/app` properties |
+| Knows about LLMs? | No — generic | Yes — Spring AI ChatClient specific |
+| Scope | Any cost-incurring Java code | Only Spring AI chat calls |
+
+In one line: the Java/Spring starter is a **method-level** integration where you decide where to put the gates. This starter is a **framework-level** integration where every Spring AI call surface is gated transparently.
+
+### When to use which
+
+**Use [`cycles-spring-boot-starter`](https://github.com/runcycles/cycles-spring-boot-starter) when:**
+
+- You call LLMs through code that is **not** Spring AI's `ChatClient` — direct HTTP calls, custom OpenAI / Anthropic / Bedrock SDKs, LangChain4j, in-house wrappers, etc.
+- You want **per-method dynamic estimates** via SpEL (e.g. `@Cycles("#tokens * 10")` where `#tokens` is a method arg).
+- You want **per-method subject routing** — extract tenant from a DTO, request context, or thread-local.
+- You want **explicit control** over which methods are gated, not blanket coverage.
+- You're cost-gating non-LLM operations: vector-store queries, document processing, third-party metered APIs.
+- You're not using Spring AI at all.
+
+**Use `cycles-spring-ai-starter` (this repo) when:**
+
+- You're using Spring AI's `ChatClient` as your LLM call surface.
+- You want **transparent gating** of every chat call without touching call sites.
+- You're OK with a **fixed-constant estimate** in v0.1.0 (v0.2 will derive per-call from prompt token count).
+- You want **minimal integration friction** — add the dep, set 6 properties, done.
+
+**Use both when:**
+
+- You have a Spring AI app that *also* has non-Spring-AI cost-incurring code (e.g., a service method that runs a vector-store query and then a Spring AI chat call — the vector store has cost, the chat has cost).
+- They wire on different conditions and don't conflict at the bean-wiring layer.
+
+Because this starter declares a dependency on `cycles-client-java-spring`, the `@Cycles` annotation is *always* on your classpath when you use this starter — no need to explicitly add the other dependency to use both.
+
+### ⚠️ The double-charge gotcha
+
+The two starters are designed to coexist, but you can accidentally double-charge if you wrap a Spring AI chat call inside an `@Cycles`-annotated method:
+
+```java
+@Service
+class SummaryService {
+    @Cycles("#tokens * 10")                       // ← Reservation #1 (AOP)
+    public String summarize(String text, int tokens) {
+        return chatClient.prompt()                // ← Reservation #2 (Spring AI advisor)
+                         .user(text)
+                         .call()
+                         .content();
+    }
+}
+```
+
+That method consumes budget *twice* for one user-perceivable operation. Both reservations charge against the same budget.
+
+**Rule of thumb:** pick one strategy per call path.
+
+| Your call path | Use |
 |---|---|
-| Spring AI (`ChatClient`-based) | **`cycles-spring-ai-starter`** (this repo) |
-| Generic Spring Boot AOP with `@Cycles` annotation + SpEL | [`cycles-spring-boot-starter`](https://github.com/runcycles/cycles-spring-boot-starter) (`io.runcycles:cycles-client-java-spring`) |
-| Both | Depend on both — they wire on different conditions and don't conflict. This starter depends on the other internally for the HTTP client. |
+| Spring AI `ChatClient.call()` directly | `cycles-spring-ai-starter` alone — don't also `@Cycles` the caller |
+| LLM via a non-Spring-AI client | `cycles-spring-boot-starter` with `@Cycles` on the method |
+| Non-LLM cost-incurring operation | `cycles-spring-boot-starter` with `@Cycles` on the method |
+| Method that *both* does non-LLM work *and* a Spring AI chat call | Either `@Cycles` (charging once for the whole method) **or** let the Spring AI advisor handle just the chat part — not both |
+
+### One-line recommendation
+
+- **Pure Spring AI app**: this starter alone. Transparent gating, no code changes.
+- **Pure non-Spring-AI Java/Spring app**: [`cycles-spring-boot-starter`](https://github.com/runcycles/cycles-spring-boot-starter) with `@Cycles` on the methods that cost money.
+- **Mixed**: depend on this starter (you get the other transitively), use `@Cycles` for non-LLM paths, let the Spring AI advisor handle Spring AI paths, and don't combine them on the same path.
 
 ## Project layout
 
