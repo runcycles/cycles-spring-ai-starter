@@ -7,7 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 0.3.0-SNAPSHOT
 
-_Next dev cycle. Entries land here before being rolled into a release._
+Three new extension points and a trace-correlation tag. Nothing in 0.3.0 breaks v0.2.0 callers — the new behaviors are off by default or controlled by `@ConditionalOnMissingBean` beans that supplement (not replace) v0.2.0 defaults.
+
+### Added
+
+- **Pluggable `SubjectResolver`.** New interface `io.runcycles.client.java.springai.subject.SubjectResolver` — `Subject resolveSubject(ChatClientRequest)`. Default impl `PropertiesSubjectResolver` preserves v0.2.0 behavior (reads tenant/workspace/app from `CyclesProperties` on every call, ignores the request). Users register a custom `SubjectResolver` bean for per-call attribution (e.g. tenant from an authenticated principal); auto-config's default backs off via `@ConditionalOnMissingBean`. The request parameter is `null` on the tool-gating path; implementations should handle `null` defensively. Threaded through `CyclesBudgetAdvisor`, `CyclesBudgetStreamAdvisor`, `CyclesToolGate`, `CyclesToolCallback`, and `CyclesBudgetLifecycle` via new constructor overloads (old constructors preserved for backward compatibility).
+- **Pluggable `PromptTokenEstimator`.** New interface `io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator` — `long estimateTokens(ChatClientRequest)`. Default impl `CharsPerTokenEstimator` preserves v0.2.0 `chars / 4` heuristic; also exposes an explicit-ratio constructor for tuning (e.g. ratio=1 for CJK-heavy content). Optimization: the lifecycle short-circuits before invoking the estimator when `estimate-from-prompt=false` OR both cost-per-token rates are 0.
+- **`JtokkitPromptTokenEstimator`** — real BPE encoding via `com.knuddels:jtokkit` (`optional=true` Maven dep). Supports `cl100k_base` (gpt-3.5-turbo, gpt-4), `o200k_base` (gpt-4o family), `p50k_base`, `p50k_edit`, `r50k_base`. Opt in via `cycles.spring-ai.token-estimator-encoding=<name>`. When the property is set but jtokkit isn't on the classpath, the auto-config logs a WARN at startup and falls back to chars/4. Unknown encoding name fails bean initialization at startup (not silently at first call).
+- **`cycles.reservation_id` on chat-client observations.** When `CyclesChatClientObservationConvention` is applied, the advisor stores the active reservation_id in `request.context()` after a successful reserve, and the convention emits it as a high-cardinality KeyValue at observation-stop time. Enables trace ↔ Cycles reservation correlation in tracing backends. Disable via `cycles.spring-ai.emit-reservation-id-on-trace=false`. New internal constants class `CyclesObservationContextKeys` holds the well-known context key (`cycles.reservation_id`) so the advisor and convention agree on spelling.
+- **End-to-end integration test** — `CyclesSpringAiIntegrationTest` boots a Spring context with the real auto-configuration active, a mock `CyclesClient`, and a stub `ChatModel`, and verifies the advisor attachment + reserve/call/commit lifecycle through real `chatClient.prompt(...).call()` invocations. Covers happy path, user-provided `SubjectResolver` override, observation convention availability for opt-in, and reservation_id key constant alignment.
+
+### Configuration properties (new)
+
+- `cycles.spring-ai.token-estimator-encoding` (string, default unset). When set + jtokkit on classpath, swaps the chars/4 default for real BPE encoding.
+- `cycles.spring-ai.emit-reservation-id-on-trace` (boolean, default `true`). Operator opt-out for the high-cardinality reservation_id tag.
+
+### Auto-configuration
+
+Now wires seven beans (each `@ConditionalOnMissingBean` so users can override): the existing five (`CyclesBudgetAdvisor`, `CyclesBudgetStreamAdvisor`, `ChatClientCustomizer`, `CyclesToolGate`, `CyclesChatClientObservationConvention`) plus the new `SubjectResolver` (`PropertiesSubjectResolver` default) and `PromptTokenEstimator` (`CharsPerTokenEstimator` default, or `JtokkitPromptTokenEstimator` when the encoding property is set + jtokkit on classpath).
+
+### Internal
+
+- `CyclesBudgetLifecycle.buildSubject()` removed; delegates to the injected `SubjectResolver`. The old inline subject-building logic now lives in `PropertiesSubjectResolver`.
+- `CyclesBudgetLifecycle.extractPromptCharCount()` removed; delegates to the injected `PromptTokenEstimator`. The chars/4 logic now lives in `CharsPerTokenEstimator`.
+- `CyclesChatClientObservationConvention.getHighCardinalityKeyValues()` no longer calls `super` — Spring AI's default impl NPEs on insufficiently-stubbed contexts and emits nothing we currently care about. Documented in the source.
+- Test bundle: 142 tests across 11 test classes (up from 93 in v0.2.0). Bundle coverage gate met (`mvn -B clean verify` passes the jacoco `check` rule).
+
+### Dependencies
+
+- `com.knuddels:jtokkit:1.1.0` added as `optional=true` Maven dependency. Consumers who opt in to the jtokkit estimator must add it explicitly to their app pom.
 
 ## [0.2.0] — 2026-05-12
 
