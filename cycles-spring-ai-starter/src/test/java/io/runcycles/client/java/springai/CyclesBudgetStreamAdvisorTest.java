@@ -8,6 +8,7 @@ import io.runcycles.client.java.spring.model.ReleaseRequest;
 import io.runcycles.client.java.spring.model.ReservationCreateRequest;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -439,6 +440,49 @@ class CyclesBudgetStreamAdvisorTest {
 
         verify(cyclesClient, never()).commitReservation(anyString(), any(CommitRequest.class));
         verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
+    // ---- Defensive: null request ----------------------------------------
+
+    @Test
+    void doesNotPutReservationIdInContextWhenRequestIsNull() {
+        // Defensive: theme C's `request != null` short-circuit fires when the advisor
+        // gets a null ChatClientRequest. Mirror of the equivalent test on the
+        // non-streaming advisor — pins the short-circuit branch in the stream advisor.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-null-req"));
+        when(chain.nextStream(null)).thenReturn(Flux.empty());
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        StepVerifier.create(advisor.adviseStream(null, chain)).verifyComplete();
+
+        verify(cyclesClient).commitReservation(eq("res-null-req"), any(CommitRequest.class));
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
+    // ---- Backward-compat constructor variants ----------------------------
+
+    @Test
+    void fourArgConstructorWithSubjectResolverWorks() {
+        // The intermediate 4-arg constructor (SubjectResolver but no PromptTokenEstimator)
+        // is preserved for direct-instantiation callers between v0.2.0 and v0.3.0 that
+        // pass a subject resolver but rely on the default chars/4 estimator.
+        CyclesBudgetStreamAdvisor fourArg = new CyclesBudgetStreamAdvisor(
+                cyclesClient, cyclesProperties, springAiProperties,
+                new PropertiesSubjectResolver(cyclesProperties));
+
+        // Exercise the constructor body via a real subscription so the lifecycle
+        // is observably-constructed (vs just `assertThat(notNull)` which leaves
+        // the lifecycle assignment uncovered in the eyes of jacoco).
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-4arg"));
+        when(chain.nextStream(request)).thenReturn(Flux.empty());
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        StepVerifier.create(fourArg.adviseStream(request, chain)).verifyComplete();
+        verify(cyclesClient).commitReservation(eq("res-4arg"), any(CommitRequest.class));
     }
 
     // ---- Helpers ---------------------------------------------------------

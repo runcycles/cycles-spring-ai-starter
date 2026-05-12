@@ -158,6 +158,38 @@ class CyclesChatClientObservationConventionTest {
     }
 
     @Test
+    void omitsReservationIdWhenContextItselfIsNull() {
+        // Defensive guard: extractReservationId returns null when the
+        // ChatClientObservationContext parameter is null. Spring AI's real contract
+        // never passes null, but the guard is there as belt-and-suspenders.
+        CyclesChatClientObservationConvention convention =
+                new CyclesChatClientObservationConvention(cyclesProperties, springAiProperties);
+
+        KeyValues highCard = convention.getHighCardinalityKeyValues(null);
+
+        // No reservation_id emitted; no NPE.
+        assertThat(highCard).noneMatch(kv -> kv.getKey().equals("cycles.reservation_id"));
+    }
+
+    @Test
+    void omitsReservationIdWhenRequestContextMapIsNull() {
+        // Defensive guard: request.context() returns null. Spring AI's contract is that
+        // the context map is always non-null + mutable, but the guard is there in case
+        // a third-party advisor wraps the request and breaks the contract.
+        ChatClientRequest request = mock(ChatClientRequest.class);
+        lenient().when(request.prompt()).thenReturn(new Prompt(List.of(new UserMessage("test"))));
+        lenient().when(request.context()).thenReturn(null);
+        lenient().when(context.getRequest()).thenReturn(request);
+
+        CyclesChatClientObservationConvention convention =
+                new CyclesChatClientObservationConvention(cyclesProperties, springAiProperties);
+
+        KeyValues highCard = convention.getHighCardinalityKeyValues(context);
+
+        assertThat(highCard).noneMatch(kv -> kv.getKey().equals("cycles.reservation_id"));
+    }
+
+    @Test
     void omitsReservationIdWhenRequestIsNull() {
         // ChatClientObservationContext.getRequest() returns null in some scenarios
         // (early observation lifecycle, broken integration). Convention must defend.

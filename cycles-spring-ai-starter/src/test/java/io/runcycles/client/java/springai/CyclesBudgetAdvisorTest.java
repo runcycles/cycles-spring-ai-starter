@@ -119,6 +119,25 @@ class CyclesBudgetAdvisorTest {
     }
 
     @Test
+    void doesNotPutReservationIdInContextWhenRequestIsNull() {
+        // Defensive: theme C's `request != null` short-circuit fires when the advisor
+        // somehow gets a null ChatClientRequest (not a real Spring AI path, but the
+        // guard exists). Verify that with reservationId != null but request == null,
+        // the put() call is skipped — no NullPointerException, no spurious work.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-null-request"));
+        when(chain.nextCall(null)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        // No exception thrown; commit fires; release does not.
+        advisor.adviseCall(null, chain);
+
+        verify(cyclesClient).commitReservation(eq("res-null-request"), any(CommitRequest.class));
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
+    @Test
     void noReservationIdInContextWhenFailOpenReserveSkipped() {
         // fail-open + reserve transport failure → reservationId=null. The advisor
         // must NOT pollute request.context() with a null or empty value.

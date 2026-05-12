@@ -123,11 +123,33 @@ public class CyclesSpringAiAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public PromptTokenEstimator cyclesPromptTokenEstimator(CyclesSpringAiProperties springAiProperties) {
+        boolean jtokkitOnClasspath = ClassUtils.isPresent(
+                JTOKKIT_ENCODINGS_CLASS, getClass().getClassLoader());
+        return resolvePromptTokenEstimator(springAiProperties, jtokkitOnClasspath);
+    }
+
+    /**
+     * Resolves the {@link PromptTokenEstimator} bean based on configuration and
+     * classpath presence. <strong>Internal API.</strong> Public so unit tests in
+     * sibling packages can exercise the jtokkit-absent fallback branch without
+     * classloader manipulation; not intended for direct user invocation. Signature
+     * may change between minor releases.
+     *
+     * @param springAiProperties Spring AI integration configuration.
+     * @param jtokkitOnClasspath true when {@code com.knuddels.jtokkit.Encodings} is
+     *                           available; pass false from tests to exercise the
+     *                           fallback path.
+     * @return the resolved estimator: {@link CharsPerTokenEstimator} when encoding
+     *         property is unset/blank or jtokkit isn't available;
+     *         {@link JtokkitPromptTokenEstimator} otherwise.
+     */
+    public static PromptTokenEstimator resolvePromptTokenEstimator(CyclesSpringAiProperties springAiProperties,
+                                                                    boolean jtokkitOnClasspath) {
         String encoding = springAiProperties.getTokenEstimatorEncoding();
         if (encoding == null || encoding.isBlank()) {
             return new CharsPerTokenEstimator();
         }
-        if (!ClassUtils.isPresent(JTOKKIT_ENCODINGS_CLASS, getClass().getClassLoader())) {
+        if (!jtokkitOnClasspath) {
             log.warn("cycles.spring-ai.token-estimator-encoding is set to '{}' but jtokkit "
                     + "is not on the classpath. Add com.knuddels:jtokkit:1.1.0 (or supply "
                     + "your own PromptTokenEstimator bean) to enable real BPE tokenization. "

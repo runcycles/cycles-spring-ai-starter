@@ -105,6 +105,50 @@ class CyclesSpringAiAutoConfigurationTest {
                 });
     }
 
+    // ---- resolvePromptTokenEstimator static helper (direct unit tests) ----------
+
+    @Test
+    void resolvePromptTokenEstimatorReturnsCharsPerTokenWhenEncodingUnset() {
+        CyclesSpringAiProperties props = new CyclesSpringAiProperties();
+        // encoding remains null
+        PromptTokenEstimator resolved = CyclesSpringAiAutoConfiguration
+                .resolvePromptTokenEstimator(props, /* jtokkitOnClasspath= */ true);
+        assertThat(resolved).isInstanceOf(CharsPerTokenEstimator.class);
+    }
+
+    @Test
+    void resolvePromptTokenEstimatorReturnsJtokkitWhenEncodingSetAndOnClasspath() {
+        CyclesSpringAiProperties props = new CyclesSpringAiProperties();
+        props.setTokenEstimatorEncoding("cl100k_base");
+        PromptTokenEstimator resolved = CyclesSpringAiAutoConfiguration
+                .resolvePromptTokenEstimator(props, /* jtokkitOnClasspath= */ true);
+        assertThat(resolved).isInstanceOf(JtokkitPromptTokenEstimator.class);
+    }
+
+    @Test
+    void resolvePromptTokenEstimatorFallsBackToCharsPerTokenWhenJtokkitAbsent() {
+        // Hard-to-test-otherwise path: property is set but jtokkit isn't on the
+        // classpath. In production this fires when an operator enables the property
+        // without adding the optional Maven dep. The auto-config logs a WARN and
+        // falls back to chars/4 — verified here by passing jtokkitOnClasspath=false
+        // directly to the package-private resolver (extracted exactly to enable
+        // testing this branch without classloader manipulation).
+        CyclesSpringAiProperties props = new CyclesSpringAiProperties();
+        props.setTokenEstimatorEncoding("cl100k_base");
+        PromptTokenEstimator resolved = CyclesSpringAiAutoConfiguration
+                .resolvePromptTokenEstimator(props, /* jtokkitOnClasspath= */ false);
+        assertThat(resolved).isInstanceOf(CharsPerTokenEstimator.class);
+    }
+
+    @Test
+    void resolvePromptTokenEstimatorTreatsBlankEncodingAsUnset() {
+        CyclesSpringAiProperties props = new CyclesSpringAiProperties();
+        props.setTokenEstimatorEncoding("   ");  // whitespace only
+        PromptTokenEstimator resolved = CyclesSpringAiAutoConfiguration
+                .resolvePromptTokenEstimator(props, /* jtokkitOnClasspath= */ true);
+        assertThat(resolved).isInstanceOf(CharsPerTokenEstimator.class);
+    }
+
     @Test
     void userProvidedTokenEstimatorOverridesDefault() {
         PromptTokenEstimator userEstimator = req -> 42L;
