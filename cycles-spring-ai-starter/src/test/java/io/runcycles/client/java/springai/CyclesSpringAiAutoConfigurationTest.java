@@ -7,6 +7,8 @@ import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiAutoConfiguration;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
+import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
+import io.runcycles.client.java.springai.subject.SubjectResolver;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.ai.chat.client.ChatClient;
@@ -42,9 +44,28 @@ class CyclesSpringAiAutoConfigurationTest {
             assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
             assertThat(ctx).hasSingleBean(ChatClientCustomizer.class);
             assertThat(ctx).hasSingleBean(CyclesChatClientObservationConvention.class);
+            assertThat(ctx).hasSingleBean(SubjectResolver.class);
+            assertThat(ctx.getBean(SubjectResolver.class)).isInstanceOf(PropertiesSubjectResolver.class);
             CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
             assertThat(props.isEnabled()).isTrue();
         });
+    }
+
+    @Test
+    void userProvidedSubjectResolverOverridesDefault() {
+        // User registers a custom resolver. The auto-configured default backs off via
+        // @ConditionalOnMissingBean. Downstream beans (advisor / stream advisor /
+        // tool gate) wire to the user's resolver.
+        SubjectResolver userResolver = req -> null;
+        contextRunner
+                .withBean("userSubjectResolver", SubjectResolver.class, () -> userResolver)
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(SubjectResolver.class);
+                    assertThat(ctx.getBean(SubjectResolver.class)).isSameAs(userResolver);
+                    // Advisors still wire — they just take the user's resolver.
+                    assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
+                });
     }
 
     @Test

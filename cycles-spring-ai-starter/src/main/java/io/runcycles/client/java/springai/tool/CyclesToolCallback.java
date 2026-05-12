@@ -5,6 +5,7 @@ import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetLifecycle;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.subject.SubjectResolver;
 import org.springframework.ai.chat.model.ToolContext;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
@@ -45,11 +46,35 @@ public class CyclesToolCallback implements ToolCallback {
     private final CyclesSpringAiProperties springAiProperties;
 
     /**
-     * Constructs a Cycles-gated wrapper around a Spring AI ToolCallback.
+     * Constructs a Cycles-gated wrapper around a Spring AI ToolCallback with an
+     * explicit subject resolver. Preferred constructor — invoked via the auto-configured
+     * {@link CyclesToolGate#wrap}.
      *
      * @param delegate           the tool callback to wrap.
      * @param cyclesClient       the Cycles HTTP client.
-     * @param cyclesProperties   SDK-level properties (subject defaults).
+     * @param cyclesProperties   SDK-level properties.
+     * @param springAiProperties Spring AI integration properties.
+     * @param subjectResolver    resolves the Cycles subject. Invoked with {@code null}
+     *                           for the {@code ChatClientRequest} parameter because tool
+     *                           callbacks don't carry one.
+     */
+    public CyclesToolCallback(ToolCallback delegate,
+                              CyclesClient cyclesClient,
+                              CyclesProperties cyclesProperties,
+                              CyclesSpringAiProperties springAiProperties,
+                              SubjectResolver subjectResolver) {
+        this.delegate = delegate;
+        this.lifecycle = new CyclesBudgetLifecycle(cyclesClient, cyclesProperties,
+                springAiProperties, subjectResolver);
+        this.springAiProperties = springAiProperties;
+    }
+
+    /**
+     * Backward-compatible constructor — uses the property-derived default resolver.
+     *
+     * @param delegate           the tool callback to wrap.
+     * @param cyclesClient       the Cycles HTTP client.
+     * @param cyclesProperties   SDK-level properties.
      * @param springAiProperties Spring AI integration properties.
      */
     public CyclesToolCallback(ToolCallback delegate,
