@@ -32,6 +32,19 @@ jobs:
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: GPG_PASSPHRASE
 
+      - name: Verify pom version is not SNAPSHOT
+        working-directory: cycles-spring-ai-starter
+        # Sonatype Central rejects SNAPSHOT publishes server-side, but we'd rather
+        # fail fast on the runner than wait for the deploy step. Tracked org-wide
+        # at runcycles/.github#61.
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          if [[ "$VERSION" == *SNAPSHOT* ]]; then
+            echo "::error::Cannot publish SNAPSHOT version: $VERSION. Drop -SNAPSHOT in the pom before tagging."
+            exit 1
+          fi
+          echo "Publishing version: $VERSION"
+
       - name: Test release build without publishing
         working-directory: cycles-spring-ai-starter
         run: mvn -B -Prelease clean verify
@@ -61,6 +74,16 @@ jobs:
           server-password: CENTRAL_PASSWORD
           gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
           gpg-passphrase: GPG_PASSPHRASE
+
+      - name: Verify pom version is not SNAPSHOT
+        working-directory: cycles-spring-ai-starter
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          if [[ "$VERSION" == *SNAPSHOT* ]]; then
+            echo "::error::Cannot publish SNAPSHOT version: $VERSION. Drop -SNAPSHOT in the pom before tagging."
+            exit 1
+          fi
+          echo "Publishing version: $VERSION"
 
       - name: Publish
         working-directory: cycles-spring-ai-starter

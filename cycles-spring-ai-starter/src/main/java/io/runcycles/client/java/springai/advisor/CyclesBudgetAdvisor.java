@@ -91,22 +91,30 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
 
     @Override
     public ChatClientResponse adviseCall(ChatClientRequest request, CallAdvisorChain chain) {
+        // reserveOrFailOpen may throw CyclesBudgetDeniedException (DENY decision) or
+        // IllegalStateException (fail-closed transport/HTTP failure); both propagate up
+        // without entering the try below, so no release happens for those — which is
+        // correct (no reservation was created).
         String reservationId = reserveOrFailOpen();
+
+        // The try block ONLY wraps chain.nextCall. If that throws, we release the
+        // reservation because the LLM call did not happen. If commit throws AFTER
+        // chain.nextCall succeeded, we do NOT release — the budget was already
+        // consumed by a successful provider call, and releasing would un-bill it.
+        ChatClientResponse response;
         try {
-            ChatClientResponse response = chain.nextCall(request);
-            if (reservationId != null) {
-                commitOrFailOpen(reservationId);
-            }
-            return response;
-        } catch (CyclesBudgetDeniedException denial) {
-            // Re-throw — never release on a denial (no reservation was created).
-            throw denial;
+            response = chain.nextCall(request);
         } catch (RuntimeException callFailure) {
             if (reservationId != null) {
                 releaseQuietly(reservationId, "chat-call-failed: " + callFailure.getClass().getSimpleName());
             }
             throw callFailure;
         }
+
+        if (reservationId != null) {
+            commitOrFailOpen(reservationId);
+        }
+        return response;
     }
 
     /**
@@ -141,7 +149,17 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
                     result.getReasonCode(),
                     result.getScopePath());
         }
-        return result.getReservationId();
+
+        // Defensive: a 2xx with an unrecognized decision or missing reservation_id
+        // must NOT silently bypass the budget gate. Treat as malformed HTTP failure
+        // so fail-open / fail-closed applies the same way as a 5xx.
+        String reservationId = result.getReservationId();
+        if (!result.isAllowed() || reservationId == null || reservationId.isBlank()) {
+            log.warn("Cycles reservation 2xx response was malformed: decision={} reservation_id={}",
+                    result.getDecision(), reservationId);
+            return handleReserveHttpFailure(response);
+        }
+        return reservationId;
     }
 
     private String handleReserveTransportFailure(RuntimeException cause) {
@@ -200,9 +218,17 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
                 .reason(reason)
                 .build();
         try {
-            cyclesClient.releaseReservation(reservationId, release);
+            CyclesResponse<Map<String, Object>> response = cyclesClient.releaseReservation(reservationId, release);
+            // CyclesClient implementations return CyclesResponse with httpError() on
+            // 4xx/5xx rather than throwing, so we must inspect the status to surface
+            // failures. Reservation will TTL-expire on the server even if release
+            // fails, so we only log — never throw — from this path.
+            if (!response.is2xx()) {
+                log.warn("Cycles release HTTP failure for reservation {} status={} body={}",
+                        reservationId, response.getStatus(), response.getBody());
+            }
         } catch (RuntimeException releaseFailure) {
-            log.warn("Cycles release after chat-call failure failed for reservation {}: {}",
+            log.warn("Cycles release transport failure for reservation {}: {}",
                     reservationId, releaseFailure.getMessage());
         }
     }

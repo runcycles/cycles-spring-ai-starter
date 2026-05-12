@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CyclesSpringAiAutoConfiguration` — gated on `ChatClient` and `ChatClientCustomizer` classes on the classpath, on a `CyclesClient` bean being present (provided by the underlying `cycles-client-java-spring` auto-configuration), and on `cycles.spring-ai.enabled` (default true).
 - `CyclesSpringAiProperties` — configuration surface under `cycles.spring-ai.*`: `enabled`, `default-estimate`, `estimate-unit`, `action-kind`, `action-name`, `fail-open`.
 - Demo module `cycles-spring-ai-demo` showing the wiring against the Spring AI OpenAI starter.
-- 22 tests, 100% bundle instruction coverage (jacoco `check` rule ≥ 95%).
+- Comprehensive unit test coverage of the reserve / call / commit / release matrix including malformed 2xx response handling, commit-failure-doesn't-release semantics, and release HTTP failure logging. 100% bundle instruction coverage (jacoco `check` rule ≥ 95%).
 
 ### Known limitations (carried into v0.2)
 - Streaming chat (`StreamAdvisor`) is not yet covered — see README "Known limitations".

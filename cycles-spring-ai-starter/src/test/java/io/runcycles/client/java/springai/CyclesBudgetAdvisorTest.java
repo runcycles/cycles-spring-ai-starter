@@ -196,7 +196,76 @@ class CyclesBudgetAdvisorTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
+    @Test
+    void reserveMalformedDecisionTreatedAsHttpFailureWhenFailClosed() {
+        // 2xx body with an unknown decision string — Decision.fromString returns null,
+        // so isDenied() == false and isAllowed() == false. Must NOT silently bypass the
+        // budget gate.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of(
+                        "decision", "FUTURE_DECISION_VALUE",
+                        "reservation_id", "res-1"
+                )));
+
+        assertThatThrownBy(() -> advisor.adviseCall(request, chain))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("reservation HTTP failure");
+
+        verifyNoInteractions(chain);
+    }
+
+    @Test
+    void reserveMalformedDecisionProceedsWhenFailOpen() {
+        springAiProperties.setFailOpen(true);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of(
+                        "decision", "FUTURE_DECISION_VALUE",
+                        "reservation_id", "res-1"
+                )));
+        when(chain.nextCall(request)).thenReturn(response);
+
+        ChatClientResponse result = advisor.adviseCall(request, chain);
+
+        assertThat(result).isSameAs(response);
+        verify(cyclesClient, never()).commitReservation(anyString(), any(CommitRequest.class));
+    }
+
+    @Test
+    void reserveAllowWithMissingReservationIdTreatedAsHttpFailureWhenFailClosed() {
+        // ALLOW decision but no reservation_id — server-side bug or response truncation;
+        // must not silently bypass the budget gate.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of(
+                        "decision", "ALLOW"
+                        // reservation_id deliberately omitted
+                )));
+
+        assertThatThrownBy(() -> advisor.adviseCall(request, chain))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("reservation HTTP failure");
+
+        verifyNoInteractions(chain);
+    }
+
     // ---- Commit fail-open / fail-closed ---------------------------------
+
+    @Test
+    void commitFailureDoesNotReleaseReservation() {
+        // After chain.nextCall succeeded, a commit failure must NOT release the
+        // reservation — the LLM call already happened and budget was consumed.
+        // Releasing would under-count actual spend.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenThrow(new RuntimeException("connection refused"));
+
+        assertThatThrownBy(() -> advisor.adviseCall(request, chain))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("commit failed");
+
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
 
     @Test
     void commitTransportFailureSurfacesWhenFailClosed() {
@@ -282,6 +351,24 @@ class CyclesBudgetAdvisorTest {
 
         assertThatThrownBy(() -> advisor.adviseCall(request, chain))
                 .isSameAs(callFailure);
+    }
+
+    @Test
+    void releaseHttpFailureLoggedButDoesNotMaskOriginalException() {
+        // DefaultCyclesClient returns CyclesResponse.httpError(...) rather than throwing
+        // for HTTP failures. The release path must check is2xx() — a silent swallow
+        // of a 500 from the release endpoint would leave reservations stuck.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        RuntimeException callFailure = new RuntimeException("provider timeout");
+        when(chain.nextCall(request)).thenThrow(callFailure);
+        when(cyclesClient.releaseReservation(anyString(), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.httpError(500, "release-server-error", Map.of()));
+
+        assertThatThrownBy(() -> advisor.adviseCall(request, chain))
+                .isSameAs(callFailure);
+
+        verify(cyclesClient).releaseReservation(anyString(), any(ReleaseRequest.class));
     }
 
     @Test
