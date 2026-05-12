@@ -5,6 +5,10 @@ All notable changes to `cycles-spring-ai-starter` will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — 0.3.0-SNAPSHOT
+
+_Next dev cycle. Entries land here before being rolled into a release._
+
 ## [0.2.0] — 2026-05-12
 
 All v0.1.0 "known limitations" addressed. This release lands streaming-chat gating, real `ChatResponse.Usage` extraction on commit, prompt-based per-call estimates, `ToolCallback` decoration via `CyclesToolGate`, and a chat-client `ObservationConvention` for Cycles attribution on traces. See per-feature entries below.
