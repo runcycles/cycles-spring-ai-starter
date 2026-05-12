@@ -21,13 +21,15 @@ public class CyclesSpringAiProperties {
 
     /**
      * Default estimated cost per ChatClient invocation, in the unit configured by
-     * {@link #estimateUnit}. Used as the pre-call reservation amount.
+     * {@link #estimateUnit}. Used as the pre-call reservation amount unless
+     * {@link #estimateFromPrompt} is enabled (in which case the estimate is derived
+     * per-call from prompt size) and falls back here when prompt-based derivation
+     * isn't applicable.
      *
-     * <p>v0.2 derives the actual committed amount from {@code ChatResponse.Usage}
-     * when {@link #inputCostPerToken} / {@link #outputCostPerToken} (or unit=TOKENS)
-     * provide a token-to-cost mapping; otherwise the estimate is committed as actual.
-     * A future release will additionally derive the pre-call estimate from prompt
-     * token count.
+     * <p>The actual amount committed after a successful call is derived from
+     * {@code ChatResponse.Usage} when {@link #inputCostPerToken} /
+     * {@link #outputCostPerToken} (or unit=TOKENS) provide a token-to-cost mapping;
+     * otherwise the estimate is committed as actual.
      */
     private long defaultEstimate = 1000L;
 

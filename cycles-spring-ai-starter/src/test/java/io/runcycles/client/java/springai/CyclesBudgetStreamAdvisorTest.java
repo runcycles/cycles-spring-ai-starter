@@ -17,13 +17,16 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.core.Ordered;
 import reactor.core.publisher.Flux;
 import reactor.test.StepVerifier;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -258,6 +261,37 @@ class CyclesBudgetStreamAdvisorTest {
 
         verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
         verify(cyclesClient, never()).commitReservation(anyString(), any(CommitRequest.class));
+    }
+
+    // ---- Prompt-based reservation estimate also applies to streaming ---
+
+    @Test
+    void streamReservationUsesPromptBasedEstimateWhenEnabledAndRatesSet() {
+        // Pins the contract that estimate-from-prompt works for the stream advisor too,
+        // not just the call advisor — both route through the shared CyclesBudgetLifecycle.
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        String promptText = "Stream this summary of the operator manual for chapter 3.";
+        Prompt prompt = new Prompt(List.of(new UserMessage(promptText)));
+        when(request.prompt()).thenReturn(prompt);
+
+        long expectedEstimate = (((long) promptText.length()) / 4L) * (25L + 100L);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-stream-prompt"));
+        when(chain.nextStream(request)).thenReturn(Flux.just(chunk1, chunk2));
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        StepVerifier.create(advisor.adviseStream(request, chain))
+                .expectNext(chunk1, chunk2)
+                .verifyComplete();
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(expectedEstimate);
     }
 
     @Test

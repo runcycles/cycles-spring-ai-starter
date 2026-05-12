@@ -10,6 +10,7 @@ import org.springframework.ai.chat.client.advisor.api.StreamAdvisor;
 import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
 import org.springframework.core.Ordered;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.SignalType;
 
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -39,7 +40,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * </ol>
  *
  * <p>The reserve / commit / release plumbing is shared with the non-streaming advisor
- * through the package-private {@link CyclesBudgetLifecycle} helper.
+ * and the tool-callback wrapper through the public-but-internal
+ * {@link CyclesBudgetLifecycle} helper.
  */
 public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
 
@@ -82,33 +84,25 @@ public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
         // any thread depending on the scheduler.
         AtomicReference<ChatClientResponse> lastResponse = new AtomicReference<>();
 
-        // Flag to coordinate complete vs cancel: a successful completion fires both
-        // doOnComplete AND doOnFinally. We only want to commit once. cancel + error
-        // also fire doOnFinally, so we track which terminal signal won.
-        AtomicReference<TerminalSignal> terminal = new AtomicReference<>(TerminalSignal.NONE);
-
         return chain.nextStream(request)
                 .doOnNext(lastResponse::set)
-                .doOnComplete(() -> terminal.compareAndSet(TerminalSignal.NONE, TerminalSignal.COMPLETE))
                 .doOnError(error -> {
-                    terminal.compareAndSet(TerminalSignal.NONE, TerminalSignal.ERROR);
                     if (reservationId != null) {
                         lifecycle.releaseQuietly(reservationId,
                                 "chat-stream-failed: " + error.getClass().getSimpleName());
                     }
                 })
                 .doOnCancel(() -> {
-                    terminal.compareAndSet(TerminalSignal.NONE, TerminalSignal.CANCEL);
                     if (reservationId != null) {
                         lifecycle.releaseQuietly(reservationId, "chat-stream-cancelled");
                     }
                 })
                 .doFinally(signal -> {
-                    if (reservationId != null && terminal.get() == TerminalSignal.COMPLETE) {
+                    // Commit only on natural completion. ON_ERROR / CANCEL already released
+                    // via their dedicated callbacks; this branch ignores them.
+                    if (reservationId != null && signal == SignalType.ON_COMPLETE) {
                         lifecycle.commitOrFailOpen(reservationId, lastResponse.get());
                     }
                 });
     }
-
-    private enum TerminalSignal { NONE, COMPLETE, ERROR, CANCEL }
 }

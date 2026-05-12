@@ -28,8 +28,9 @@ import org.springframework.core.Ordered;
  * <p>For streaming invocations (e.g. {@code chatClient.prompt(...).stream()}), use the
  * companion {@link CyclesBudgetStreamAdvisor}.
  *
- * <p>The reserve / commit / release plumbing is shared with the stream advisor through
- * the package-private {@link CyclesBudgetLifecycle} helper.
+ * <p>The reserve / commit / release plumbing is shared with the stream advisor and
+ * the tool-callback wrapper through the public-but-internal {@link CyclesBudgetLifecycle}
+ * helper.
  */
 public class CyclesBudgetAdvisor implements CallAdvisor {
 

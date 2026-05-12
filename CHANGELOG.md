@@ -7,34 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 0.2.0-SNAPSHOT
 
+All v0.1.0 "known limitations" have been addressed on this branch.
+
 ### Added
-- **Streaming chat gating via `CyclesBudgetStreamAdvisor`.** New advisor mirrors the `CyclesBudgetAdvisor` lifecycle for `chatClient.prompt(...).stream()` invocations. Reserves before subscribing to the upstream Flux; commits when the stream completes (using usage from the last chunk that carried it); releases on stream error or subscriber cancellation.
+
+- **Streaming chat gating via `CyclesBudgetStreamAdvisor`.** Mirrors the `CyclesBudgetAdvisor` lifecycle for `chatClient.prompt(...).stream()` invocations. Reserves before subscribing to the upstream Flux; commits when the stream completes (using usage from the last chunk that carried it); releases on stream error or subscriber cancellation.
 - **Real `ChatResponse.Usage` extraction on commit** (applies to both the call and stream advisors). Reads token usage from the chat response after a successful call/completion and commits the actual cost instead of the pre-call estimate. Three modes:
   - `estimate-unit=TOKENS`: commits total tokens from `Usage.getTotalTokens()`.
   - `input-cost-per-token` and/or `output-cost-per-token` configured: commits `(promptTokens × inputRate) + (completionTokens × outputRate)`.
   - Otherwise: continues to commit the estimate as actual (v0.1.0-compatible fallback).
-- Two new configuration properties:
-  - `cycles.spring-ai.input-cost-per-token` (long, default 0).
-  - `cycles.spring-ai.output-cost-per-token` (long, default 0).
-- Both new properties reject negative values at config-binding time.
-- Auto-configuration registers both `CyclesBudgetAdvisor` and `CyclesBudgetStreamAdvisor` beans (both with `@ConditionalOnMissingBean`); the `ChatClientCustomizer` attaches both via `builder.defaultAdvisors(callAdvisor, streamAdvisor)`.
+- **Prompt-based reservation estimate.** New `cycles.spring-ai.estimate-from-prompt` boolean property (default `false`). When enabled with `input-cost-per-token` and/or `output-cost-per-token` set, the pre-call reservation is computed from the prompt char count rather than the fixed `default-estimate`. Token approximation: `prompt-chars / 4`; reservation amount: `tokens × (inputRate + outputRate)`. Falls back to `default-estimate` when prompt text is empty, rates are 0, or the computed estimate would be 0. Applies to both the call and stream advisors.
+- **Tool-level budget gating via `CyclesToolCallback`.** Wrapper class around Spring AI `ToolCallback` that reserves before each tool invocation, commits on success, releases on exception. Tool reservations commit `default-estimate` as actual — tool callbacks don't expose token usage to the gate. Action labels are reported separately from chat: `cycles.spring-ai.tool-action-kind` (default `tool.call`) and `cycles.spring-ai.tool-action-name-prefix` (default `spring-ai-tool:`, the wrapped tool's name is appended). Auto-configured `CyclesToolGate` factory bean — users opt in by calling `cyclesToolGate.wrap(myTool)` where they construct their tools.
+- **`CyclesChatClientObservationConvention`** — Spring AI `ChatClientObservationConvention` that extends `DefaultChatClientObservationConvention` and appends low-cardinality Cycles attribution tags to every chat-client trace: `cycles.tenant`, `cycles.workspace`, `cycles.app`, `cycles.action_kind`, `cycles.action_name`. Auto-configured as a bean but **not auto-attached** to the ChatClient.Builder — users opt in via `builder.observationConvention(cyclesConvention)` so trace visibility remains a deliberate choice. Per-call high-cardinality identifiers (reservation IDs) are intentionally excluded; that surface can be added in a future release if there's demand for trace ↔ reservation correlation. Null SDK properties (tenant/workspace/app) are substituted as `unknown` to satisfy Micrometer's KeyValues non-null contract.
+
+### Configuration properties (new)
+
+- `cycles.spring-ai.input-cost-per-token` (long, default `0`). Rejected at binding time when negative.
+- `cycles.spring-ai.output-cost-per-token` (long, default `0`). Rejected at binding time when negative.
+- `cycles.spring-ai.estimate-from-prompt` (boolean, default `false`).
+- `cycles.spring-ai.tool-action-kind` (string, default `tool.call`).
+- `cycles.spring-ai.tool-action-name-prefix` (string, default `spring-ai-tool:`).
+
+### Auto-configuration
+
+Now wires five beans (each with `@ConditionalOnMissingBean` so users can override): `CyclesBudgetAdvisor`, `CyclesBudgetStreamAdvisor`, the `ChatClientCustomizer` (bean name `cyclesChatClientCustomizer`) that attaches both advisors, `CyclesToolGate` (tool-wrapper factory, not auto-applied), and `CyclesChatClientObservationConvention` (not auto-attached to builders).
 
 ### Internal
-- Reserve / commit / release plumbing extracted to a package-private `CyclesBudgetLifecycle` helper, shared by the call and stream advisors. The two public advisor classes are thin wrappers that supply the right reactive vs imperative glue.
+
+- Reserve / commit / release plumbing extracted to `CyclesBudgetLifecycle`, shared by the call advisor, stream advisor, and tool callback. Promoted to `public` (marked **internal API** in javadoc) so the new tool package can reuse it. The lifecycle accepts explicit action-kind / action-name labels so tool reservations are distinguishable from chat reservations in audit history.
 - Build dependency: `spring-boot-dependencies` BOM imported alongside `spring-ai-bom` in `dependencyManagement` so `reactor-test` (used by the streaming tests) has a managed version.
-
-### Added (continued)
-- **Prompt-based reservation estimate.** New `cycles.spring-ai.estimate-from-prompt` boolean property (default false). When enabled with `input-cost-per-token` and/or `output-cost-per-token` set, the pre-call reservation is computed from the prompt char count rather than the fixed `default-estimate`. Token approximation: `prompt-chars / 4`; reservation amount: `tokens × (inputRate + outputRate)` (assuming output ≈ input). Falls back to `default-estimate` when prompt text is empty, rates are 0, or the computed estimate would be 0.
-
-### Added (continued)
-- **Tool-level budget gating via `CyclesToolCallback`.** New wrapper class around Spring AI `ToolCallback` that reserves before each tool invocation, commits on success, releases on exception. Action labels reported separately from chat: `cycles.spring-ai.tool-action-kind` (default `tool.call`) and `cycles.spring-ai.tool-action-name-prefix` (default `spring-ai-tool:`, the wrapped tool's name is appended). Auto-configured `CyclesToolGate` factory bean — users opt in by calling `cyclesToolGate.wrap(myTool)` where they construct their tools.
-- **`CyclesBudgetLifecycle`** promoted from package-private to public (internal API marker via javadoc) to support the tool package. Methods on the lifecycle now accept explicit action-kind / action-name labels so tool reservations are distinguishable from chat reservations in audit history.
-
-### Added (continued)
-- **`CyclesChatClientObservationConvention`** — Spring AI `ChatClientObservationConvention` that extends `DefaultChatClientObservationConvention` and appends low-cardinality Cycles attribution tags to every chat-client trace: `cycles.tenant`, `cycles.workspace`, `cycles.app`, `cycles.action_kind`, `cycles.action_name`. Auto-configured as a bean but **not auto-attached** to the ChatClient.Builder — applying it is a user opt-in via `builder.observationConvention(cyclesConvention)` so trace visibility remains a deliberate choice rather than a default. Per-call high-cardinality identifiers (reservation IDs) are intentionally excluded; they can be added in a future release if there's demand for trace ↔ reservation correlation. Null SDK properties (tenant/workspace/app) are substituted as `unknown` to satisfy Micrometer's KeyValues non-null contract.
-
-### v0.2 status
-All v0.1.0 known-limitations have been addressed on this branch. Pending: documentation polish and a release decision.
+- Test bundle: 82 tests across 5 test classes; 100% instruction / 100% branch coverage on the bundle.
 
 ## [0.1.0] — 2026-05-12
 
@@ -47,12 +49,12 @@ All v0.1.0 known-limitations have been addressed on this branch. Pending: docume
 - Demo module `cycles-spring-ai-demo` showing the wiring against the Spring AI OpenAI starter.
 - Comprehensive unit test coverage of the reserve / call / commit / release matrix including malformed 2xx response handling, commit-failure-doesn't-release semantics, and release HTTP failure logging. 100% bundle instruction coverage (jacoco `check` rule ≥ 95%).
 
-### Known limitations (carried into v0.2)
-- Streaming chat (`StreamAdvisor`) is not yet covered — see README "Known limitations".
-- Estimate is a fixed constant (`default-estimate`); per-call dynamic estimates from prompt token count land in v0.2.
-- Commit uses estimate as actual; real `ChatResponse.Usage` token-count extraction lands in v0.2.
-- No `ToolCallback` decoration; tool-level authority gates land in v0.2.
-- No `ObservationConvention`; richer audit-trail attribution lands in v0.2.
+### Known limitations (all addressed in 0.2.0-SNAPSHOT)
+- Streaming chat (`StreamAdvisor`) was not yet covered.
+- Estimate was a fixed constant (`default-estimate`); no per-call dynamic estimates.
+- Commit used estimate as actual; no real `ChatResponse.Usage` token-count extraction.
+- No `ToolCallback` decoration; no tool-level authority gates.
+- No `ObservationConvention`; no richer audit-trail attribution.
 
 ### Dependencies
 - Spring Boot 3.5.3
