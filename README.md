@@ -16,11 +16,11 @@ Per-call lifecycle: **reserve → call → commit** on success, **reserve → ca
 <dependency>
     <groupId>io.runcycles</groupId>
     <artifactId>cycles-spring-ai-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
-This transitively pulls in [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) which provides the underlying HTTP client to the Cycles server.
+This dependency transitively pulls in [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) which provides the underlying HTTP client to the Cycles server.
 
 ### 2. Configure connection + subject
 
@@ -71,7 +71,49 @@ public class OrderAgent {
 
 No code changes to your call sites. The advisor is auto-attached to every `ChatClient` built from the auto-configured `ChatClient.Builder` via a `ChatClientCustomizer` bean.
 
+### 4. (Optional) Gate tool invocations
+
+For agents that call tools, wrap each `ToolCallback` with the auto-configured `CyclesToolGate` to reserve / commit / release per tool call. Tool reservations report `tool.call` / `spring-ai-tool:<name>` action labels so they're separable from chat reservations in audit history.
+
+```java
+@Configuration
+class ToolWiring {
+    @Bean
+    ToolCallback getWeatherTool(CyclesToolGate cyclesToolGate) {
+        ToolCallback raw = MethodToolCallback.builder()
+                .toolDefinition(ToolDefinition.builder().name("get_weather").build())
+                .toolMethod(...)
+                .build();
+        return cyclesToolGate.wrap(raw); // ← Cycles-gated
+    }
+}
+```
+
+Tool gating is opt-in: Spring AI doesn't provide a hook to auto-decorate every registered tool, so you choose which tools to gate. Currently tool reservations commit `default-estimate` as actual (tool callbacks don't expose token usage to the gate).
+
+### 5. (Optional) Cycles attribution on observability traces
+
+The auto-configured `CyclesChatClientObservationConvention` appends low-cardinality Cycles attribution tags (`cycles.tenant`, `cycles.workspace`, `cycles.app`, `cycles.action_kind`, `cycles.action_name`) to every chat-client trace. Apply it explicitly on a `ChatClient.Builder` to opt in:
+
+```java
+@Service
+class TracedAgent {
+    private final ChatClient chatClient;
+
+    TracedAgent(ChatClient.Builder builder, CyclesChatClientObservationConvention cyclesConvention) {
+        this.chatClient = builder
+                .observationConvention(cyclesConvention)
+                .build();
+    }
+    // ...
+}
+```
+
+The bean is auto-configured but NOT auto-attached — applying a convention has cross-cutting trace-visibility implications that should be a deliberate user decision.
+
 ## How it works
+
+**Non-streaming chat** (`chatClient.prompt(...).call()`):
 
 | Step | Cycles wire call | Spring AI insertion point |
 |---|---|---|
@@ -80,7 +122,27 @@ No code changes to your call sites. The advisor is auto-attached to every `ChatC
 | Commit on success | `POST /v1/reservations/{id}/commit` with actual amount | After `chain.nextCall` returns |
 | Release on error | `POST /v1/reservations/{id}/release` with reason | Catch block re-throws original after release |
 
-The advisor is registered automatically via Spring AI's `ChatClientCustomizer` mechanism — `ChatClientAutoConfiguration` discovers customizer beans and applies them to the builder. **Simply exposing a `CallAdvisor` bean is not enough** in Spring AI 1.0+ — the customizer is the supported wiring path.
+**Streaming chat** (`chatClient.prompt(...).stream()`) — same lifecycle adapted to the reactive signal model. The entire pipeline is wrapped in `Flux.defer(...)` so reservation state is per-subscription (no leak when the Flux is assembled but never subscribed; resubscribing gets a fresh reservation):
+
+| Step | Cycles wire call | Reactor signal |
+|---|---|---|
+| Pre-stream | `POST /v1/reservations` | On subscription (inside `Flux.defer`). Reservation failures (denial, transport) surface as `onError` to the subscriber — the reactive-idiomatic shape; handle via `.onErrorResume(...)`. |
+| Stream | (advisor passes chunks through, tracking last seen) | `doOnNext(lastResponse::set)` |
+| Commit on complete | `POST /v1/reservations/{id}/commit` with usage from the last chunk | `concatWith(Mono.defer(...))` after the upstream emits `onComplete`. Commit runs **before** the subscriber observes terminal completion, so a fail-closed commit failure correctly surfaces as `onError` (the way the non-streaming advisor fails the call). |
+| Release on error | `POST /v1/reservations/{id}/release` | `doOnError` |
+| Release on cancel | `POST /v1/reservations/{id}/release` | `doOnCancel` |
+| Release on assembly failure | `POST /v1/reservations/{id}/release` | If `chain.nextStream(request)` throws synchronously after we reserved, we release and re-throw. |
+
+**Tool invocations** (when wrapped via `CyclesToolGate.wrap`):
+
+| Step | Cycles wire call | Tool insertion point |
+|---|---|---|
+| Pre-call | `POST /v1/reservations` with `tool.call` action kind | Before `delegate.call(...)` |
+| Call | (wrapper delegates to the wrapped tool) | Spring AI invokes the tool |
+| Commit on success | `POST /v1/reservations/{id}/commit` with `default-estimate` as actual | After delegate returns |
+| Release on exception | `POST /v1/reservations/{id}/release` | Wrapper re-throws original after release |
+
+Both chat advisors are registered automatically via Spring AI's `ChatClientCustomizer` mechanism — `ChatClientAutoConfiguration` discovers customizer beans and applies them to the builder. **Simply exposing a `CallAdvisor` bean is not enough** in Spring AI 1.0+ — the customizer is the supported wiring path. The tool gate and observation convention are exposed as beans for explicit opt-in (see Quick Start steps 4 and 5).
 
 ## Compatibility
 
@@ -88,26 +150,31 @@ The advisor is registered automatically via Spring AI's `ChatClientCustomizer` m
 - **Spring Boot**: 3.5.x
 - **Spring AI**: 1.0.x (BOM-managed; tested compatible with 1.1.x via the post-scaffold Dependabot bump to 1.1.6)
 
-## Known limitations (v0.1.0)
+## What's new in `0.2.0`
 
-These are *deliberate* deferrals to v0.2, not accidents:
+All known limitations from v0.1.0 are addressed:
 
-- **Streaming calls are not covered.** This advisor implements `CallAdvisor` only. Streaming invocations (`chatClient.prompt(...).stream()`) use Spring AI's separate `StreamAdvisor` plumbing and bypass Cycles entirely. A `CyclesBudgetStreamAdvisor` lands in v0.2.
-- **Estimate is a fixed constant.** Every call reserves `cycles.spring-ai.default-estimate` units. v0.2 will derive a per-call estimate from prompt token count + model pricing.
-- **Commit uses estimate as actual.** Token-usage extraction from `ChatResponse` varies by provider and is not portable across all Spring AI model adapters in v0.1.0. The commit therefore records the estimate as actual usage. v0.2 will read `ChatResponse.getMetadata().getUsage()` for real token counts.
-- **No `ToolCallback` decoration.** Action-authority gates on tool calls land in v0.2 (per the Spring AI integration plan).
-- **No `ObservationConvention`.** Audit-trail attribution beyond the reservation lifecycle lands in v0.2.
+- ✅ **Streaming chat gating.** `CyclesBudgetStreamAdvisor` mirrors the lifecycle of the non-streaming advisor for `chatClient.prompt(...).stream()` invocations. Reserves before subscribing; commits on stream complete; releases on error or subscriber cancellation. Both advisors are auto-attached to the auto-configured `ChatClient.Builder`.
+- ✅ **Real `ChatResponse.Usage` extraction on commit** — when the LLM provider returns usage and either `input-cost-per-token` / `output-cost-per-token` are configured (or `estimate-unit=TOKENS`), the advisor commits the actual cost computed from tokens rather than the estimate. Falls back to estimate-as-actual when usage data is missing. Applies to both the call and stream advisors (the stream advisor uses the last chunk that carried usage).
+- ✅ **Prompt-based per-call estimate.** When `cycles.spring-ai.estimate-from-prompt=true` and one of the cost-per-token rates is configured, the pre-call reservation is sized from the prompt's character count (chars / 4 → tokens) rather than the fixed `default-estimate`. Falls back to `default-estimate` when the prompt is empty or rates are zero.
+- ✅ **`ToolCallback` decoration.** `CyclesToolCallback` wraps any Spring AI `ToolCallback` with the same reserve / commit / release lifecycle. Users opt in via the auto-configured `CyclesToolGate.wrap(...)` factory. Tool reservations report distinct `tool.call` / `spring-ai-tool:<name>` action labels so they're separable from chat reservations in audit history.
+- ✅ **`ObservationConvention` for chat-client traces.** `CyclesChatClientObservationConvention` extends Spring AI's default convention and appends low-cardinality Cycles attribution tags (`cycles.tenant`, `cycles.workspace`, `cycles.app`, `cycles.action_kind`, `cycles.action_name`) to every chat-client observation. Auto-configured as a bean but NOT auto-attached — users apply it explicitly via `chatClientBuilder.observationConvention(cyclesConvention)`.
 
 ## Configuration reference
 
 | Property | Default | Description |
 |---|---|---|
 | `cycles.spring-ai.enabled` | `true` | Master switch. Set false to disable Cycles wiring entirely. |
-| `cycles.spring-ai.default-estimate` | `1000` | Per-call estimate value (until v0.2 derives it from prompt size). |
+| `cycles.spring-ai.default-estimate` | `1000` | Default per-call estimate, in the configured unit. Used unless `estimate-from-prompt=true` derives a per-call value from prompt size. |
 | `cycles.spring-ai.estimate-unit` | `USD_MICROCENTS` | Unit for the estimate. Cycles `Unit` enum values: `USD_MICROCENTS`, `TOKENS`, `CREDITS`, `RISK_POINTS`. |
 | `cycles.spring-ai.action-kind` | `llm.chat` | Action.kind label reported to Cycles. |
 | `cycles.spring-ai.action-name` | `spring-ai-chat` | Action.name label reported to Cycles. |
 | `cycles.spring-ai.fail-open` | `false` | When true, transport errors against Cycles are logged and the LLM call proceeds. Budget denials are always surfaced. |
+| `cycles.spring-ai.input-cost-per-token` | `0` | Per-input-token cost in the estimate unit. When set (with `output-cost-per-token`), the advisor commits actual token-based cost instead of the estimate. Example: 25 (= $2.50/1M tokens for OpenAI gpt-4o input). |
+| `cycles.spring-ai.output-cost-per-token` | `0` | Per-output-token cost. Example: 100 (= $10.00/1M tokens for OpenAI gpt-4o output). |
+| `cycles.spring-ai.estimate-from-prompt` | `false` | When `true` and at least one cost-per-token rate is set, sizes the pre-call reservation from the prompt char count (`chars / 4` × combined rate). Falls back to `default-estimate` when the prompt is empty or rates are zero. |
+| `cycles.spring-ai.tool-action-kind` | `tool.call` | Action.kind label reported for `CyclesToolCallback`-wrapped tool invocations (distinct from chat's `action-kind`). |
+| `cycles.spring-ai.tool-action-name-prefix` | `spring-ai-tool:` | Prefix prepended to the wrapped tool's name to produce the action.name label (e.g. `spring-ai-tool:get_weather`). |
 
 Connection + subject properties (`cycles.base-url`, `cycles.api-key`, `cycles.tenant`, etc.) come from [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) — see that repo's README for the full list.
 
@@ -124,7 +191,7 @@ The two Java integrations are **complementary, not competing** — they target d
 | Where it intercepts | Any Java method you annotate | Every `chatClient.prompt(...).call()` invocation |
 | Granularity | Method-level, explicit opt-in | Framework-level, transparent |
 | Call-site changes | Yes — annotate methods with `@Cycles` | No — wired automatically |
-| Estimate computation | SpEL: `@Cycles("#tokens * 10")` (dynamic per-call) | Fixed constant from properties (v0.1.0) |
+| Estimate computation | SpEL: `@Cycles("#tokens * 10")` (dynamic per-call) | `default-estimate`, or prompt-char × token-rate when `estimate-from-prompt=true` |
 | Subject routing | SpEL: can pull tenant from method args | Constant from `cycles.tenant/workspace/app` properties |
 | Knows about LLMs? | No — generic | Yes — Spring AI ChatClient specific |
 | Scope | Any cost-incurring Java code | Only Spring AI chat calls |
@@ -146,8 +213,7 @@ In one line: the Java/Spring starter is a **method-level** integration where you
 
 - You're using Spring AI's `ChatClient` as your LLM call surface.
 - You want **transparent gating** of every chat call without touching call sites.
-- You're OK with a **fixed-constant estimate** in v0.1.0 (v0.2 will derive per-call from prompt token count).
-- You want **minimal integration friction** — add the dep, set 6 properties, done.
+- You want **minimal integration friction** — add the dep, set 6 properties, done. (Per-call estimates from prompt size are available via `estimate-from-prompt=true`; for richer dynamic estimates use the `cycles-spring-boot-starter` SpEL surface.)
 
 **Use both when:**
 
@@ -207,6 +273,28 @@ mvn -B verify --file cycles-spring-ai-demo/pom.xml
 ```
 
 (In Claude Code remote environments, use `mvn-proxy` instead of `mvn` — see [CLAUDE.md](./CLAUDE.md).)
+
+## Releasing
+
+The project uses Maven [CI-friendly versions](https://maven.apache.org/maven-ci-friendly.html) via the `${revision}` property, driven from `.mvn/maven.config` at the repo root. Both poms (starter + demo) declare `<version>${revision}</version>` and the demo's dep on the starter uses `${revision}` as well, so a version bump is a single-line edit.
+
+```text
+# .mvn/maven.config (single source of truth — applies to every mvn invocation)
+-Drevision=X.Y.Z-SNAPSHOT
+```
+
+The inline `<revision>` defaults in each pom's `<properties>` block should be kept in lockstep with `.mvn/maven.config` so the flattened pom that ships to Maven Central doesn't carry stale `<revision>` metadata. (The `flatten-maven-plugin`'s `resolveCiFriendliesOnly` mode resolves `<version>` but preserves the `<properties>` block as-is, so an IDE or build that bypasses `.mvn/maven.config` reads the inline default — and the published pom carries it verbatim.)
+
+To cut a release (concrete example: cutting `X.Y.Z` from a `X.Y.Z-SNAPSHOT` dev branch):
+
+1. Edit `.mvn/maven.config`: `-Drevision=X.Y.Z-SNAPSHOT` → `-Drevision=X.Y.Z`. Also bump the inline `<revision>` defaults in both poms to `X.Y.Z` to match. Commit and push to `main`.
+2. Create a **GitHub Release** for the new version (e.g. via `gh release create vX.Y.Z --generate-notes` or the GitHub UI). Creating the release also creates the tag if it doesn't exist. The publish workflow triggers on `release: [created]` — **pushing a bare tag does not trigger publishing**, only the release event does.
+3. The publish workflow checks `mvn help:evaluate -Dexpression=project.version` against the tag — both now read `X.Y.Z` from `.mvn/maven.config`, so the version-vs-tag gate passes and the artifact deploys to Maven Central.
+4. After the release ships, bump `.mvn/maven.config` and the inline pom `<revision>` defaults to the next SNAPSHOT (e.g. `X.Y.Z+1-SNAPSHOT` or `X.Y+1.0-SNAPSHOT`). Commit, push.
+
+To test a release build without publishing (e.g. to verify GPG signing works on a new key): trigger the publish workflow via `workflow_dispatch` from the Actions tab. That runs the `test-release-build` job only — no deploy.
+
+The `flatten-maven-plugin` (configured on both poms in `resolveCiFriendliesOnly` mode) substitutes `${revision}` with the resolved value at `process-resources` and produces a `.flattened-pom.xml` that gets installed/deployed. Sonatype Central requires a literal version in the published pom; non-CI-friendly properties (BOM versions, etc.) remain as `${...}` in the published pom and are interpolated against the same pom's `<properties>` block at consumer-resolve time — the standard behavior.
 
 ## License
 

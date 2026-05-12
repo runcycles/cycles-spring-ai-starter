@@ -17,8 +17,15 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisorChain;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.metadata.ChatResponseMetadata;
+import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.core.Ordered;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -26,6 +33,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -197,6 +205,22 @@ class CyclesBudgetAdvisorTest {
     }
 
     @Test
+    void reserveResultUnparseableProceedsWhenFailOpen() {
+        // Mirror of the above with fail-open=true so the early-return branch in
+        // reserveOrFailOpen (line 145) is exercised as a normal return, not as
+        // a throw-propagation.
+        springAiProperties.setFailOpen(true);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(CyclesResponse.success(200, null));
+        when(chain.nextCall(request)).thenReturn(response);
+
+        ChatClientResponse result = advisor.adviseCall(request, chain);
+
+        assertThat(result).isSameAs(response);
+        verify(cyclesClient, never()).commitReservation(anyString(), any(CommitRequest.class));
+    }
+
+    @Test
     void reserveMalformedDecisionTreatedAsHttpFailureWhenFailClosed() {
         // 2xx body with an unknown decision string — Decision.fromString returns null,
         // so isDenied() == false and isAllowed() == false. Must NOT silently bypass the
@@ -228,6 +252,23 @@ class CyclesBudgetAdvisorTest {
 
         assertThat(result).isSameAs(response);
         verify(cyclesClient, never()).commitReservation(anyString(), any(CommitRequest.class));
+    }
+
+    @Test
+    void reserveAllowWithBlankReservationIdTreatedAsHttpFailure() {
+        // ALLOW decision with whitespace-only reservation_id — should be treated
+        // as malformed (same as missing reservation_id).
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of(
+                        "decision", "ALLOW",
+                        "reservation_id", "   "
+                )));
+
+        assertThatThrownBy(() -> advisor.adviseCall(request, chain))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("reservation HTTP failure");
+
+        verifyNoInteractions(chain);
     }
 
     @Test
@@ -383,6 +424,523 @@ class CyclesBudgetAdvisorTest {
                 .isSameAs(callFailure);
 
         verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
+    // ---- Prompt-based reservation estimate (v0.2) -----------------------
+
+    @Test
+    void reservationUsesPromptBasedEstimateWhenEnabledAndRatesSet() {
+        // estimate-from-prompt=true with rates configured: estimate is derived from
+        // promptChars / 4 × (inputRate + outputRate).
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        // A prompt with 80 chars → 20 estimated tokens → 20 * (25 + 100) = 2500.
+        String promptText = "Summarize this passage from the operator manual: chapter 3 widget care";
+        // Length is intentionally 70 chars — actual count below.
+        Prompt prompt = new Prompt(List.of(new UserMessage(promptText)));
+        when(request.prompt()).thenReturn(prompt);
+
+        long expectedEstimate = (promptText.length() / 4L) * (25L + 100L);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-prompt-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(expectedEstimate);
+    }
+
+    @Test
+    void reservationFallsBackToDefaultEstimateWhenPromptEstimationEnabledButRatesAreZero() {
+        // estimate-from-prompt=true but no rates set: can't compute a meaningful
+        // estimate from chars alone, fall back to default-estimate.
+        springAiProperties.setEstimateFromPrompt(true);
+        // rates remain 0 (default)
+
+        Prompt prompt = new Prompt(List.of(new UserMessage("some prompt text")));
+        when(request.prompt()).thenReturn(prompt);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-prompt-2"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L); // default
+    }
+
+    @Test
+    void reservationFallsBackToDefaultEstimateWhenPromptIsNull() {
+        // request.prompt() returns null (unusual but defensible — defensive null check).
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(25L);
+        when(request.prompt()).thenReturn(null);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-null-prompt"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L);
+    }
+
+    @Test
+    void reservationSkipsMessagesWithNullText() {
+        // Multimodal messages may have null .getText() (content lives in attachments).
+        // Such messages are skipped in the char count rather than NPE'ing.
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        Message nullTextMessage = mock(Message.class);
+        when(nullTextMessage.getText()).thenReturn(null);
+        Message validMessage = new UserMessage("hello world this is forty chars of text!!");
+
+        Prompt prompt = new Prompt(List.of(nullTextMessage, validMessage));
+        when(request.prompt()).thenReturn(prompt);
+
+        long expectedEstimate = (((long) "hello world this is forty chars of text!!".length()) / 4L) * (25L + 100L);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-null-text"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(expectedEstimate);
+    }
+
+    @Test
+    void reservationFallsBackToDefaultWhenComputedEstimateIsZero() {
+        // Very short prompt + small rates → estimatedTokens=0 → estimate=0.
+        // Falls back to default-estimate rather than committing a 0 reservation
+        // (which the Cycles server might also accept but is semantically wrong).
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(1L);
+        // 2-char prompt / 4 chars-per-token = 0 estimated tokens
+        Prompt prompt = new Prompt(List.of(new UserMessage("hi")));
+        when(request.prompt()).thenReturn(prompt);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-zero"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L); // fallback
+    }
+
+    @Test
+    void reservationUsesPromptEstimateWithOnlyOutputRate() {
+        // Cover the (inputRate > 0 || outputRate > 0) OR-short-circuit second branch:
+        // inputRate=0, outputRate>0.
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(0L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        String promptText = "Estimate from prompt size with only output rate configured.";
+        Prompt prompt = new Prompt(List.of(new UserMessage(promptText)));
+        when(request.prompt()).thenReturn(prompt);
+
+        long expectedEstimate = (((long) promptText.length()) / 4L) * (0L + 100L);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-out-only"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(expectedEstimate);
+    }
+
+    @Test
+    void reservationFallsBackToDefaultEstimateWhenPromptIsEmpty() {
+        // estimate-from-prompt=true, rates set, but prompt has no text content.
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(25L);
+
+        Prompt prompt = new Prompt(List.of()); // no messages
+        when(request.prompt()).thenReturn(prompt);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-prompt-3"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L); // default
+    }
+
+    @Test
+    void reservationUsesDefaultEstimateWhenPromptEstimationDisabled() {
+        // Default behavior: estimate-from-prompt=false → lifecycle does not look at the
+        // prompt at all, uses default-estimate. (No request.prompt() stub needed —
+        // the code path never accesses it.)
+        springAiProperties.setInputCostPerToken(25L);  // rates are set but prompt mode is off
+        // estimateFromPrompt remains false (default)
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-prompt-4"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L); // default
+    }
+
+    // ---- Real Usage extraction on commit (v0.2) -------------------------
+
+    @Test
+    void commitUsesEstimateAsActualWhenNoUsageInResponse() {
+        // Default ChatClientResponse mock has chatResponse()=null → fallback to estimate.
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        CommitRequest sent = commitCaptor.getValue();
+        assertThat(sent.getActual().getAmount()).isEqualTo(1000L); // default estimate
+        assertThat(sent.getActual().getUnit().name()).isEqualTo("USD_MICROCENTS");
+    }
+
+    @Test
+    void commitUsesComputedCostWhenRatesAndUsagePresent() {
+        // OpenAI gpt-4o-style rates: input=25 µ¢/tok, output=100 µ¢/tok.
+        // 100 prompt + 50 completion → (100*25) + (50*100) = 2500 + 5000 = 7500 µ¢
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(100);
+        when(usage.getCompletionTokens()).thenReturn(50);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        CommitRequest sent = commitCaptor.getValue();
+        assertThat(sent.getActual().getAmount()).isEqualTo(7500L);
+        assertThat(sent.getActual().getUnit().name()).isEqualTo("USD_MICROCENTS");
+    }
+
+    @Test
+    void commitUsesTotalTokensWhenUnitIsTokensAndUsagePresent() {
+        // Unit=TOKENS bypasses cost rates — commit total tokens directly.
+        springAiProperties.setEstimateUnit("TOKENS");
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getTotalTokens()).thenReturn(150);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        CommitRequest sent = commitCaptor.getValue();
+        assertThat(sent.getActual().getAmount()).isEqualTo(150L);
+        assertThat(sent.getActual().getUnit().name()).isEqualTo("TOKENS");
+    }
+
+    @Test
+    void commitFallsBackToEstimateWhenRatesSetButUsageMissing() {
+        // Rates configured but provider returned no usage info — estimate-as-actual.
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(null); // metadata missing
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        CommitRequest sent = commitCaptor.getValue();
+        assertThat(sent.getActual().getAmount()).isEqualTo(1000L); // estimate fallback
+    }
+
+    @Test
+    void commitFallsBackToEstimateWhenMetadataUsageIsNull() {
+        // ChatResponse + metadata are present, but metadata.getUsage() returns null.
+        // Some providers omit usage on streaming-aborted responses or certain errors.
+        springAiProperties.setInputCostPerToken(25L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(null);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        CommitRequest sent = commitCaptor.getValue();
+        assertThat(sent.getActual().getAmount()).isEqualTo(1000L); // estimate fallback
+    }
+
+    @Test
+    void commitWithTokensUnitFallsBackToEstimateWhenUsageMissing() {
+        // unit=TOKENS but no usage at all in response — fall through to estimate path.
+        springAiProperties.setEstimateUnit("TOKENS");
+
+        // response.chatResponse() returns null → usage is null
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        CommitRequest sent = commitCaptor.getValue();
+        assertThat(sent.getActual().getAmount()).isEqualTo(1000L); // estimate fallback
+        assertThat(sent.getActual().getUnit().name()).isEqualTo("TOKENS");
+    }
+
+    @Test
+    void commitUsesOnlyOutputRateWhenInputRateIsZero() {
+        // inputCostPerToken=0, outputCostPerToken>0. Should still compute from usage
+        // using the output rate alone (covers the OR-short-circuit second branch).
+        springAiProperties.setInputCostPerToken(0L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(100);
+        when(usage.getCompletionTokens()).thenReturn(50);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        CommitRequest sent = commitCaptor.getValue();
+        // (100 * 0) + (50 * 100) = 5000
+        assertThat(sent.getActual().getAmount()).isEqualTo(5000L);
+    }
+
+    @Test
+    void commitWithTokensUnitFallsBackToEstimateWhenTotalTokensNull() {
+        // unit=TOKENS but provider returned no total — fall through to rate / estimate path.
+        // Since rates aren't configured here either, end result is estimate-as-actual.
+        springAiProperties.setEstimateUnit("TOKENS");
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getTotalTokens()).thenReturn(null);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        CommitRequest sent = commitCaptor.getValue();
+        assertThat(sent.getActual().getAmount()).isEqualTo(1000L);
+        assertThat(sent.getActual().getUnit().name()).isEqualTo("TOKENS"); // unit preserved
+    }
+
+    @Test
+    void commitFallsBackToEstimateWhenBothTokenBreakdownsAreNull() {
+        // A Usage object that returns null for BOTH promptTokens AND completionTokens is
+        // "provider didn't populate the breakdown" — treating it as zeros would silently
+        // under-bill. The lifecycle falls back to the estimate in this case.
+        // (Compare: a Usage that returns 0 for both is "no work done" — that's a real
+        // signal of a zero-cost call and is NOT covered here.)
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(null);
+        when(usage.getCompletionTokens()).thenReturn(null);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(commitCaptor.getValue().getActual().getAmount()).isEqualTo(1000L); // estimate
+    }
+
+    @Test
+    void commitUsesAvailableBreakdownWhenOnlyOneSideIsNull() {
+        // Some providers populate only prompt tokens during streaming, or only completion
+        // tokens on certain response shapes. We bill what we have rather than fall back.
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(100);
+        when(usage.getCompletionTokens()).thenReturn(null);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        // 100 * 25 + 0 * 100 = 2500 (one side null, the other counted)
+        assertThat(commitCaptor.getValue().getActual().getAmount()).isEqualTo(2500L);
+    }
+
+    @Test
+    void commitUsesAvailableBreakdownWhenOnlyPromptTokensAreNull() {
+        // Mirror of commitUsesAvailableBreakdownWhenOnlyOneSideIsNull but with the OTHER
+        // side null — covers the second arm of the &&-short-circuit in the all-null check.
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(null);
+        when(usage.getCompletionTokens()).thenReturn(50);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        // 0 * 25 + 50 * 100 = 5000 (prompt side null but completion is counted)
+        assertThat(commitCaptor.getValue().getActual().getAmount()).isEqualTo(5000L);
+    }
+
+    @Test
+    void commitChargesZeroWhenBothBreakdownsAreLiteralZero() {
+        // Distinct from the null/null case above: literal zeros mean "no work done"
+        // (a real provider signal — e.g. a call that produced no completion). Bill 0.
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(0);
+        when(usage.getCompletionTokens()).thenReturn(0);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(commitCaptor.getValue().getActual().getAmount()).isEqualTo(0L);
     }
 
     // ---- Estimate unit override -----------------------------------------

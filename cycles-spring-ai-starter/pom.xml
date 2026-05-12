@@ -7,11 +7,11 @@
 
     <groupId>io.runcycles</groupId>
     <artifactId>cycles-spring-ai-starter</artifactId>
-    <version>0.1.0</version>
+    <version>${revision}</version>
     <packaging>jar</packaging>
 
     <name>Cycles Spring AI Starter — runtime authority for Spring AI agents</name>
-    <description>Spring AI starter for AI agent runtime governance with Cycles. Adds budget enforcement on Spring AI ChatClient invocations via a CallAdvisor with reserve / call / commit / release lifecycle against the Cycles server, attached via ChatClientCustomizer auto-configuration. Multi-tenant LLM cost control with per-subject attribution for production Spring AI agents. Compatible with Spring Boot 3.5+ and Spring AI 1.0+. Note: v0.1.0 covers non-streaming calls only; streaming, per-call estimate derivation, ToolCallback decoration, and ObservationConvention land in v0.2.</description>
+    <description>Spring AI starter for AI agent runtime governance with Cycles. Adds budget enforcement on Spring AI ChatClient invocations via call and streaming advisors with reserve / call / commit / release lifecycle against the Cycles server, auto-attached via ChatClientCustomizer. Per-call estimate from prompt size, real ChatResponse.Usage extraction on commit, ToolCallback decoration via CyclesToolGate, and a chat-client ObservationConvention for Cycles attribution on traces. Multi-tenant LLM cost control with per-subject attribution for production Spring AI agents. Compatible with Spring Boot 3.5+ and Spring AI 1.0+.</description>
     <url>https://github.com/runcycles/cycles-spring-ai-starter</url>
 
     <developers>
@@ -40,6 +40,15 @@
     </scm>
 
     <properties>
+        <!-- Single source of truth for the project version is .mvn/maven.config at the
+             repo root (-Drevision=...). The CLI value always wins. The default below is
+             ONLY a fallback for IDE imports that don't pick up .mvn/maven.config; keep
+             it in lockstep with .mvn/maven.config so the flattened pom that ships to
+             Maven Central doesn't carry stale <revision> metadata (the flatten plugin's
+             resolveCiFriendliesOnly mode resolves <version> but preserves the
+             <properties> block as-is). -->
+        <revision>0.2.0</revision>
+
         <java.version>21</java.version>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
@@ -52,6 +61,15 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- spring-boot-dependencies first so any explicit downstream pins win. Manages
+                 reactor-core / reactor-test versions (needed for the streaming advisor's tests). -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring.boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.ai</groupId>
                 <artifactId>spring-ai-bom</artifactId>
@@ -114,10 +132,46 @@
             <version>5.3.2</version>
             <scope>test</scope>
         </dependency>
+
+        <!-- Reactor StepVerifier for testing the streaming advisor's Flux lifecycle. -->
+        <dependency>
+            <groupId>io.projectreactor</groupId>
+            <artifactId>reactor-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
         <plugins>
+            <!-- Resolve ${revision} in the published pom. Sonatype Central rejects
+                 unresolved placeholders in pom <version> fields, and Maven's default
+                 install/deploy ships the source pom as-is. flatten-maven-plugin in
+                 resolveCiFriendliesOnly mode substitutes ${revision} (and ${sha1} /
+                 ${changelist} if we ever use them) and leaves the rest of the pom
+                 untouched — much safer than the default mode which strips a lot of
+                 build-only sections. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <version>1.7.3</version>
+                <configuration>
+                    <updatePomFile>true</updatePomFile>
+                    <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <phase>process-resources</phase>
+                        <goals><goal>flatten</goal></goals>
+                    </execution>
+                    <execution>
+                        <id>flatten.clean</id>
+                        <phase>clean</phase>
+                        <goals><goal>clean</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>

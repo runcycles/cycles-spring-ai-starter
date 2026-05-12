@@ -1,0 +1,348 @@
+package io.runcycles.client.java.springai.advisor;
+
+import io.runcycles.client.java.spring.client.CyclesClient;
+import io.runcycles.client.java.spring.config.CyclesProperties;
+import io.runcycles.client.java.spring.model.Action;
+import io.runcycles.client.java.spring.model.Amount;
+import io.runcycles.client.java.spring.model.CommitRequest;
+import io.runcycles.client.java.spring.model.CyclesResponse;
+import io.runcycles.client.java.spring.model.ReleaseRequest;
+import io.runcycles.client.java.spring.model.ReservationCreateRequest;
+import io.runcycles.client.java.spring.model.ReservationResult;
+import io.runcycles.client.java.spring.model.Subject;
+import io.runcycles.client.java.spring.model.Unit;
+import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
+import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.client.ChatClientRequest;
+import org.springframework.ai.chat.client.ChatClientResponse;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.metadata.ChatResponseMetadata;
+import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
+
+import java.util.Map;
+import java.util.UUID;
+
+/**
+ * Reserve / commit / release lifecycle shared by the chat advisors and the tool callback
+ * wrapper.
+ *
+ * <p>Used by {@link CyclesBudgetAdvisor} (non-streaming chat),
+ * {@link CyclesBudgetStreamAdvisor} (streaming chat), and
+ * {@code CyclesToolCallback} (per-tool gating). Centralizes the reservation-against-Cycles
+ * plumbing — wire calls, fail-open handling, actual-amount extraction from
+ * {@code ChatResponse.Usage}.
+ *
+ * <p><strong>Internal API.</strong> Public for cross-package access only. Not part of the
+ * stable user-facing surface — methods may change between minor releases. The stable
+ * surface is the advisor classes, the {@code CyclesToolCallback}/{@code CyclesToolGate}
+ * factory, and the {@link CyclesSpringAiProperties} configuration block.
+ */
+public final class CyclesBudgetLifecycle {
+
+    private static final Logger log = LoggerFactory.getLogger(CyclesBudgetLifecycle.class);
+
+    private final CyclesClient cyclesClient;
+    private final CyclesProperties cyclesProperties;
+    private final CyclesSpringAiProperties springAiProperties;
+
+    /**
+     * Constructs the lifecycle helper. Public for cross-package access; not for direct
+     * user instantiation (use the advisor/tool classes that wrap it).
+     *
+     * @param cyclesClient       Cycles HTTP client.
+     * @param cyclesProperties   SDK-level configuration.
+     * @param springAiProperties Spring AI integration configuration.
+     */
+    public CyclesBudgetLifecycle(CyclesClient cyclesClient,
+                                 CyclesProperties cyclesProperties,
+                                 CyclesSpringAiProperties springAiProperties) {
+        this.cyclesClient = cyclesClient;
+        this.cyclesProperties = cyclesProperties;
+        this.springAiProperties = springAiProperties;
+    }
+
+    /**
+     * Chat-flavored reservation — uses the configured chat action labels
+     * ({@code cycles.spring-ai.action-kind} / {@code action-name}).
+     *
+     * @param request the originating ChatClientRequest. Used for prompt-based estimation
+     *                when {@code estimate-from-prompt=true}. May be null.
+     * @return reservation id or null on fail-open skip.
+     */
+    public String reserveOrFailOpen(ChatClientRequest request) {
+        return reserveOrFailOpen(request,
+                springAiProperties.getActionKind(),
+                springAiProperties.getActionName());
+    }
+
+    /**
+     * Reservation with explicit action labels — used by the tool-callback wrapper to
+     * distinguish tool invocations from chat invocations in Cycles audit history.
+     *
+     * @param request    originating request for prompt-based estimation, or null.
+     * @param actionKind action kind label to report (e.g. {@code llm.chat}, {@code tool.call}).
+     * @param actionName action name label to report (e.g. tool name).
+     * @return reservation id or null on fail-open skip.
+     */
+    public String reserveOrFailOpen(ChatClientRequest request, String actionKind, String actionName) {
+        ReservationCreateRequest req = buildReservationRequest(request, actionKind, actionName);
+        CyclesResponse<Map<String, Object>> response;
+        try {
+            response = cyclesClient.createReservation(req);
+        } catch (RuntimeException transportFailure) {
+            return handleReserveTransportFailure(transportFailure);
+        }
+
+        if (!response.is2xx()) {
+            return handleReserveHttpFailure(response);
+        }
+
+        ReservationResult result = ReservationResult.fromMap(response.getBody());
+        if (result == null) {
+            return handleReserveHttpFailure(response);
+        }
+
+        if (result.isDenied()) {
+            throw new CyclesBudgetDeniedException(
+                    "Cycles denied Spring AI chat call: reason=" + result.getReasonCode()
+                            + " scope=" + result.getScopePath(),
+                    result.getReasonCode(),
+                    result.getScopePath());
+        }
+
+        // Defensive: a 2xx with unrecognized decision or missing reservation_id must NOT
+        // silently bypass the budget gate. Treat as malformed HTTP failure.
+        String reservationId = result.getReservationId();
+        if (!result.isAllowed() || reservationId == null || reservationId.isBlank()) {
+            log.warn("Cycles reservation 2xx response was malformed: decision={} reservation_id={}",
+                    result.getDecision(), reservationId);
+            return handleReserveHttpFailure(response);
+        }
+        return reservationId;
+    }
+
+    private String handleReserveTransportFailure(RuntimeException cause) {
+        if (springAiProperties.isFailOpen()) {
+            log.warn("Cycles reservation transport failure (fail-open=true; proceeding without budget gate): {}",
+                    cause.getMessage());
+            return null;
+        }
+        throw new IllegalStateException("Cycles reservation failed (fail-open=false)", cause);
+    }
+
+    private String handleReserveHttpFailure(CyclesResponse<Map<String, Object>> response) {
+        if (springAiProperties.isFailOpen()) {
+            log.warn("Cycles reservation HTTP failure status={} (fail-open=true; proceeding): body={}",
+                    response.getStatus(), response.getBody());
+            return null;
+        }
+        throw new IllegalStateException(
+                "Cycles reservation HTTP failure status=" + response.getStatus());
+    }
+
+    /**
+     * Commit a reservation with actual amount derived from the chat response usage.
+     *
+     * @param reservationId the reservation to commit.
+     * @param chatResponse  the chat response (may be null when invoked from streaming
+     *                      paths that didn't observe any emitted element).
+     */
+    public void commitOrFailOpen(String reservationId, ChatClientResponse chatResponse) {
+        CommitRequest commit = CommitRequest.builder()
+                .idempotencyKey(UUID.randomUUID().toString())
+                .actual(buildActualAmount(chatResponse))
+                .build();
+        CyclesResponse<Map<String, Object>> commitResponse;
+        try {
+            commitResponse = cyclesClient.commitReservation(reservationId, commit);
+        } catch (RuntimeException transportFailure) {
+            if (springAiProperties.isFailOpen()) {
+                log.warn("Cycles commit transport failure (fail-open=true; ignoring): {}",
+                        transportFailure.getMessage());
+                return;
+            }
+            throw new IllegalStateException(
+                    "Cycles commit failed for reservation " + reservationId + " (fail-open=false)",
+                    transportFailure);
+        }
+        if (!commitResponse.is2xx()) {
+            if (springAiProperties.isFailOpen()) {
+                log.warn("Cycles commit HTTP failure status={} for reservation {} "
+                                + "(fail-open=true; ignoring): body={}",
+                        commitResponse.getStatus(), reservationId, commitResponse.getBody());
+                return;
+            }
+            throw new IllegalStateException(
+                    "Cycles commit HTTP failure status=" + commitResponse.getStatus()
+                            + " for reservation " + reservationId);
+        }
+    }
+
+    /**
+     * Release a reservation, swallowing any failure (transport or HTTP). The reservation
+     * will TTL-expire on the server anyway, so a failed release is a logging concern,
+     * not a runtime one.
+     *
+     * @param reservationId the reservation to release.
+     * @param reason        free-form reason string captured in audit history.
+     */
+    public void releaseQuietly(String reservationId, String reason) {
+        ReleaseRequest release = ReleaseRequest.builder()
+                .idempotencyKey(UUID.randomUUID().toString())
+                .reason(reason)
+                .build();
+        try {
+            CyclesResponse<Map<String, Object>> response = cyclesClient.releaseReservation(reservationId, release);
+            if (!response.is2xx()) {
+                log.warn("Cycles release HTTP failure for reservation {} status={} body={}",
+                        reservationId, response.getStatus(), response.getBody());
+            }
+        } catch (RuntimeException releaseFailure) {
+            log.warn("Cycles release transport failure for reservation {}: {}",
+                    reservationId, releaseFailure.getMessage());
+        }
+    }
+
+    // ── Helpers shared between reservation build and actual-amount build ───────────────
+
+    private ReservationCreateRequest buildReservationRequest(ChatClientRequest request,
+                                                              String actionKind,
+                                                              String actionName) {
+        return ReservationCreateRequest.builder()
+                .idempotencyKey(UUID.randomUUID().toString())
+                .subject(buildSubject())
+                .action(new Action(actionKind, actionName, null))
+                .estimate(buildReservationEstimate(request))
+                .build();
+    }
+
+    /**
+     * Compute the reservation estimate. When {@code estimate-from-prompt=true} and the
+     * request carries non-empty prompt text and at least one cost-per-token rate is set,
+     * derives an estimate from {@code prompt-char-count / 4} approximated tokens × the
+     * sum of the input and output rates (assuming output ≈ input in token count, which
+     * is conservative-ish for most chat workloads). Falls back to {@link #buildEstimateAmount}
+     * (i.e. {@code default-estimate}) when prompt-based estimation isn't applicable.
+     */
+    private Amount buildReservationEstimate(ChatClientRequest request) {
+        if (springAiProperties.isEstimateFromPrompt() && request != null) {
+            long promptChars = extractPromptCharCount(request);
+            long inputRate = springAiProperties.getInputCostPerToken();
+            long outputRate = springAiProperties.getOutputCostPerToken();
+            if (promptChars > 0 && (inputRate > 0 || outputRate > 0)) {
+                long estimatedTokens = promptChars / 4;
+                long estimate = estimatedTokens * (inputRate + outputRate);
+                if (estimate > 0) {
+                    return new Amount(resolveUnit(), estimate);
+                }
+            }
+        }
+        return buildEstimateAmount();
+    }
+
+    private static long extractPromptCharCount(ChatClientRequest request) {
+        Prompt prompt = request.prompt();
+        if (prompt == null) {
+            return 0L;
+        }
+        long total = 0L;
+        // Spring AI guarantees a non-null list of non-null Message instances on Prompt.
+        // The text of an individual message can be null (e.g. multimodal messages where
+        // the content is a Media list rather than text), so we skip those.
+        for (Message message : prompt.getInstructions()) {
+            String text = message.getText();
+            if (text != null) {
+                total += text.length();
+            }
+        }
+        return total;
+    }
+
+    private Subject buildSubject() {
+        return Subject.builder()
+                .tenant(cyclesProperties.getTenant())
+                .workspace(cyclesProperties.getWorkspace())
+                .app(cyclesProperties.getApp())
+                .workflow(cyclesProperties.getWorkflow())
+                .agent(cyclesProperties.getAgent())
+                .toolset(cyclesProperties.getToolset())
+                .build();
+    }
+
+    private Amount buildEstimateAmount() {
+        Unit unit = resolveUnit();
+        return new Amount(unit, springAiProperties.getDefaultEstimate());
+    }
+
+    /**
+     * Compute the actual amount to commit from the chat response's token usage,
+     * falling back to the estimate when usage data or rates aren't available.
+     *
+     * <p>Three modes, in priority order:
+     * <ol>
+     *   <li>{@code estimate-unit=TOKENS}: commit total tokens directly (no rate config needed).</li>
+     *   <li>{@code input-cost-per-token} or {@code output-cost-per-token} configured and usage
+     *       present: commit {@code (promptTokens * inputCost) + (completionTokens * outputCost)}.</li>
+     *   <li>Otherwise: commit the estimate as actual (v0.1.0-compatible fallback).</li>
+     * </ol>
+     *
+     * <p>Tolerates null at every step — providers occasionally omit usage data in
+     * non-OpenAI-shaped responses, and we don't want to throw at commit time.
+     */
+    private Amount buildActualAmount(ChatClientResponse chatResponse) {
+        Unit unit = resolveUnit();
+        Usage usage = extractUsage(chatResponse);
+
+        if (unit == Unit.TOKENS && usage != null && usage.getTotalTokens() != null) {
+            return new Amount(unit, usage.getTotalTokens().longValue());
+        }
+
+        long inputRate = springAiProperties.getInputCostPerToken();
+        long outputRate = springAiProperties.getOutputCostPerToken();
+        if (usage != null && (inputRate > 0 || outputRate > 0)) {
+            Integer promptTokens = usage.getPromptTokens();
+            Integer completionTokens = usage.getCompletionTokens();
+            // A Usage object that returns null for BOTH breakdown fields is "I have no
+            // idea" (provider didn't populate the response), not "no work done". Treating
+            // it as zero would silently under-bill — fall back to the estimate instead.
+            // When only one breakdown is missing we still bill what we have (some
+            // providers populate prompt tokens only during streaming, for example).
+            if (promptTokens == null && completionTokens == null) {
+                return buildEstimateAmount();
+            }
+            long actual = (nullSafeLong(promptTokens) * inputRate)
+                        + (nullSafeLong(completionTokens) * outputRate);
+            return new Amount(unit, actual);
+        }
+
+        return buildEstimateAmount();
+    }
+
+    private Unit resolveUnit() {
+        Unit unit = Unit.fromString(springAiProperties.getEstimateUnit());
+        return unit == null ? Unit.USD_MICROCENTS : unit;
+    }
+
+    private static Usage extractUsage(ChatClientResponse chatResponse) {
+        if (chatResponse == null) {
+            return null;
+        }
+        ChatResponse innerResponse = chatResponse.chatResponse();
+        if (innerResponse == null) {
+            return null;
+        }
+        ChatResponseMetadata metadata = innerResponse.getMetadata();
+        if (metadata == null) {
+            return null;
+        }
+        return metadata.getUsage();
+    }
+
+    private static long nullSafeLong(Integer value) {
+        return value == null ? 0L : value.longValue();
+    }
+}

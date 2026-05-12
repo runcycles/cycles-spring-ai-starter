@@ -3,15 +3,20 @@ package io.runcycles.client.java.springai;
 import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
+import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiAutoConfiguration;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 /**
  * Smoke tests for the Cycles Spring AI auto-configuration.
@@ -34,7 +39,9 @@ class CyclesSpringAiAutoConfigurationTest {
     void wiresAdvisorAndCustomizerWhenEnabledByDefault() {
         contextRunner.run(ctx -> {
             assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
+            assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
             assertThat(ctx).hasSingleBean(ChatClientCustomizer.class);
+            assertThat(ctx).hasSingleBean(CyclesChatClientObservationConvention.class);
             CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
             assertThat(props.isEnabled()).isTrue();
         });
@@ -46,17 +53,19 @@ class CyclesSpringAiAutoConfigurationTest {
                 .withPropertyValues("cycles.spring-ai.enabled=false")
                 .run(ctx -> {
                     assertThat(ctx).doesNotHaveBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx).doesNotHaveBean(CyclesBudgetStreamAdvisor.class);
                     assertThat(ctx).doesNotHaveBean(ChatClientCustomizer.class);
                 });
     }
 
     @Test
     void doesNotWireWithoutCyclesClientBean() {
-        // No CyclesClient → @ConditionalOnBean fails → advisor not registered.
+        // No CyclesClient → @ConditionalOnBean fails → advisors not registered.
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(CyclesSpringAiAutoConfiguration.class))
                 .run(ctx -> {
                     assertThat(ctx).doesNotHaveBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx).doesNotHaveBean(CyclesBudgetStreamAdvisor.class);
                     assertThat(ctx).doesNotHaveBean(ChatClientCustomizer.class);
                 });
     }
@@ -83,7 +92,10 @@ class CyclesSpringAiAutoConfigurationTest {
                         "cycles.spring-ai.estimate-unit=TOKENS",
                         "cycles.spring-ai.action-kind=llm.completion",
                         "cycles.spring-ai.action-name=gpt-4o",
-                        "cycles.spring-ai.fail-open=true"
+                        "cycles.spring-ai.fail-open=true",
+                        "cycles.spring-ai.estimate-from-prompt=true",
+                        "cycles.spring-ai.tool-action-kind=tool.exec",
+                        "cycles.spring-ai.tool-action-name-prefix=my-tool:"
                 )
                 .run(ctx -> {
                     CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
@@ -93,7 +105,28 @@ class CyclesSpringAiAutoConfigurationTest {
                     assertThat(props.getEstimateUnit()).isEqualTo("TOKENS");
                     assertThat(props.getActionKind()).isEqualTo("llm.completion");
                     assertThat(props.getActionName()).isEqualTo("gpt-4o");
+                    assertThat(props.isEstimateFromPrompt()).isTrue();
+                    assertThat(props.getToolActionKind()).isEqualTo("tool.exec");
+                    assertThat(props.getToolActionNamePrefix()).isEqualTo("my-tool:");
                 });
+    }
+
+    @Test
+    void customizerAttachesBothCallAndStreamAdvisorsToChatClientBuilder() {
+        // Exercise the lambda body of cyclesChatClientCustomizer — verify it actually
+        // calls builder.defaultAdvisors(callAdvisor, streamAdvisor). Without this test
+        // the lambda is registered as a bean but never invoked, leaving its body
+        // uncovered (and a subtle regression risk if the wiring shape changes).
+        contextRunner.run(ctx -> {
+            ChatClientCustomizer customizer = ctx.getBean("cyclesChatClientCustomizer", ChatClientCustomizer.class);
+            CyclesBudgetAdvisor callAdvisor = ctx.getBean(CyclesBudgetAdvisor.class);
+            CyclesBudgetStreamAdvisor streamAdvisor = ctx.getBean(CyclesBudgetStreamAdvisor.class);
+            ChatClient.Builder builder = mock(ChatClient.Builder.class);
+
+            customizer.customize(builder);
+
+            verify(builder).defaultAdvisors(callAdvisor, streamAdvisor);
+        });
     }
 
     @Test
@@ -109,6 +142,60 @@ class CyclesSpringAiAutoConfigurationTest {
                     assertThat(ctx.getBean(CyclesBudgetAdvisor.class)).isSameAs(userAdvisor);
                     // Customizer still wires (it depends on the now-user-supplied advisor).
                     assertThat(ctx).hasBean("cyclesChatClientCustomizer");
+                });
+    }
+
+    @Test
+    void userProvidedStreamAdvisorOverridesAutoConfigured() {
+        // Symmetric to the call-advisor override — user-supplied stream advisor takes
+        // precedence and the customizer picks it up.
+        CyclesBudgetStreamAdvisor userStreamAdvisor = Mockito.mock(CyclesBudgetStreamAdvisor.class);
+        contextRunner
+                .withBean("userCyclesBudgetStreamAdvisor", CyclesBudgetStreamAdvisor.class, () -> userStreamAdvisor)
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
+                    assertThat(ctx.getBean(CyclesBudgetStreamAdvisor.class)).isSameAs(userStreamAdvisor);
+                    assertThat(ctx).hasBean("cyclesChatClientCustomizer");
+                });
+    }
+
+    @Test
+    void rejectsNegativeInputCostPerTokenAtBindingTime() {
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.input-cost-per-token=-1")
+                .run(ctx -> {
+                    assertThat(ctx).hasFailed();
+                    assertThat(ctx.getStartupFailure())
+                            .rootCause()
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessageContaining("input-cost-per-token must be non-negative");
+                });
+    }
+
+    @Test
+    void rejectsNegativeOutputCostPerTokenAtBindingTime() {
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.output-cost-per-token=-5")
+                .run(ctx -> {
+                    assertThat(ctx).hasFailed();
+                    assertThat(ctx.getStartupFailure())
+                            .rootCause()
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessageContaining("output-cost-per-token must be non-negative");
+                });
+    }
+
+    @Test
+    void bindsCostPerTokenProperties() {
+        contextRunner
+                .withPropertyValues(
+                        "cycles.spring-ai.input-cost-per-token=25",
+                        "cycles.spring-ai.output-cost-per-token=100"
+                )
+                .run(ctx -> {
+                    CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
+                    assertThat(props.getInputCostPerToken()).isEqualTo(25L);
+                    assertThat(props.getOutputCostPerToken()).isEqualTo(100L);
                 });
     }
 
