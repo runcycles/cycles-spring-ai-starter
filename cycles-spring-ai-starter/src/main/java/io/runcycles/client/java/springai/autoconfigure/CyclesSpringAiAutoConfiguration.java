@@ -137,6 +137,21 @@ public class CyclesSpringAiAutoConfiguration {
         return new JtokkitPromptTokenEstimator(encoding);
     }
 
+    /**
+     * Creates the Cycles non-streaming budget advisor bean.
+     *
+     * <p>{@link ConditionalOnMissingBean} causes this auto-configured advisor to back off
+     * when the application provides its own {@code CyclesBudgetAdvisor} bean — e.g. a
+     * subclass with custom reserve/commit semantics. Standard Spring Boot
+     * auto-configuration etiquette: defaults yield to user-provided beans.
+     *
+     * @param cyclesClient        the Cycles HTTP client.
+     * @param cyclesProperties    SDK-level configuration.
+     * @param springAiProperties  Spring AI integration configuration.
+     * @param subjectResolver     resolves the Cycles subject per reservation.
+     * @param tokenEstimator      estimates prompt tokens for prompt-based reservation sizing.
+     * @return the budget-gating call advisor.
+     */
     @Bean
     @ConditionalOnMissingBean
     public CyclesBudgetAdvisor cyclesBudgetAdvisor(CyclesClient cyclesClient,
@@ -211,6 +226,9 @@ public class CyclesSpringAiAutoConfiguration {
      * @param cyclesClient       the Cycles HTTP client.
      * @param cyclesProperties   SDK-level configuration.
      * @param springAiProperties Spring AI integration configuration.
+     * @param subjectResolver    resolves the Cycles subject for each tool reservation.
+     *                           Invoked with {@code null} for the {@code ChatClientRequest}
+     *                           parameter because tool callbacks don't carry one.
      * @return the tool gate factory.
      */
     @Bean

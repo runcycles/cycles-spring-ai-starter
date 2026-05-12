@@ -1,6 +1,6 @@
 [![CI](https://github.com/runcycles/cycles-spring-ai-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/runcycles/cycles-spring-ai-starter/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/runcycles/cycles-spring-ai-starter/actions)
+[![Coverage](https://img.shields.io/badge/coverage-%E2%89%A595%25-brightgreen)](https://github.com/runcycles/cycles-spring-ai-starter/actions)
 
 # Cycles Spring AI Starter — runtime authority for Spring AI agents
 
@@ -16,7 +16,7 @@ Per-call lifecycle: **reserve → call → commit** on success, **reserve → ca
 <dependency>
     <groupId>io.runcycles</groupId>
     <artifactId>cycles-spring-ai-starter</artifactId>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
 </dependency>
 ```
 
