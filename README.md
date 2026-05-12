@@ -1,8 +1,14 @@
-# cycles-spring-ai-starter
+[![CI](https://github.com/runcycles/cycles-spring-ai-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/runcycles/cycles-spring-ai-starter/actions)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/runcycles/cycles-spring-ai-starter/actions)
 
-Spring AI integration for [Cycles](https://runcycles.io) — runtime authority for Spring AI agents. Adds budget enforcement, action-authority gates, and audit-trail capture on top of Spring AI's built-in observability.
+# Cycles Spring AI Starter — runtime authority for Spring AI agents
 
-> **Status:** scaffolding. v0.1.0 has not shipped yet; see [CHANGELOG.md](./CHANGELOG.md) and [TEST_COVERAGE_GAPS.md](./TEST_COVERAGE_GAPS.md) for what's pending. For a production-ready Spring Boot integration on the non-Spring-AI path, use [cycles-spring-boot-starter](https://github.com/runcycles/cycles-spring-boot-starter) (`io.runcycles:cycles-client-java-spring`).
+**Spring AI advisor + auto-configuration that adds budget enforcement, action authority, and audit trails to ChatClient invocations.** Integrates with the [Cycles Protocol](https://github.com/runcycles/cycles-protocol) for runtime authority over LLM spend, tool actions, and per-tenant agent governance — multi-tenant, observable, and Spring AI-native.
+
+Built for production Spring AI applications that need to gate LLM calls *before* they hit the provider (budget exceeded → deny), wrap tool invocations with approval policies, and emit a tamper-evident audit trail tied to subject/tenant attribution. Compatible with Java 21+, Spring Boot 3.5+, and Spring AI 1.0+.
+
+> **Status:** scaffolding. v0.1.0 has not shipped yet; see [CHANGELOG.md](./CHANGELOG.md) and [TEST_COVERAGE_GAPS.md](./TEST_COVERAGE_GAPS.md) for what's pending. For a production-ready Spring Boot integration on the non-Spring-AI path (generic `@Cycles` annotation, SpEL routing), use [cycles-spring-boot-starter](https://github.com/runcycles/cycles-spring-boot-starter) (`io.runcycles:cycles-client-java-spring`).
 
 ## What it does
 

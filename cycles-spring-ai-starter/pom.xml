@@ -11,7 +11,7 @@
     <packaging>jar</packaging>
 
     <name>Cycles Spring AI Starter — runtime authority for Spring AI agents</name>
-    <description>Spring AI integration for Cycles: budget enforcement, action-authority gates, and audit trail on Spring AI's CallAdvisor, ToolCallback, and Observation extension points. Adds runtime authority on top of Spring AI's built-in observability for production agent applications.</description>
+    <description>Spring AI starter for AI agent runtime governance with Cycles. Adds budget enforcement, action authority, and audit trails to Spring AI ChatClient invocations via CallAdvisor pre/post hooks, ToolCallback decoration, and Observation handling. Multi-tenant LLM cost control, tool-call gating, and per-subject attribution for production Spring AI agents. Compatible with Spring Boot 3.5+ and Spring AI 1.0+.</description>
     <url>https://github.com/runcycles/cycles-spring-ai-starter</url>
 
     <developers>
