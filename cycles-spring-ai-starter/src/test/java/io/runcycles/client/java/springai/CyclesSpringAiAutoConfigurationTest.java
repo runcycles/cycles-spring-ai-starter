@@ -10,6 +10,7 @@ import io.runcycles.client.java.springai.observation.CyclesChatClientObservation
 import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
 import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
+import io.runcycles.client.java.springai.tokenizer.JtokkitPromptTokenEstimator;
 import io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -59,6 +60,49 @@ class CyclesSpringAiAutoConfigurationTest {
             assertThat(ctx).hasSingleBean(PromptTokenEstimator.class);
             assertThat(ctx.getBean(PromptTokenEstimator.class)).isInstanceOf(CharsPerTokenEstimator.class);
         });
+    }
+
+    @Test
+    void wiresJtokkitEstimatorWhenEncodingPropertySet() {
+        // Property set + jtokkit on test classpath -> JtokkitPromptTokenEstimator wins
+        // over the chars-per-token default. Bean is still injected as PromptTokenEstimator.
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.token-estimator-encoding=cl100k_base")
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(PromptTokenEstimator.class);
+                    assertThat(ctx.getBean(PromptTokenEstimator.class))
+                            .isInstanceOf(JtokkitPromptTokenEstimator.class);
+                });
+    }
+
+    @Test
+    void invalidEncodingPropertyFailsBeanInitializationAtStartup() {
+        // An unknown encoding name should surface as a bean-initialization failure at
+        // startup (not as a silently-wrong estimator at first call). JtokkitPromptTokenEstimator
+        // throws IllegalArgumentException from its constructor; Spring wraps that and
+        // ApplicationContext fails to start.
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.token-estimator-encoding=not_a_real_encoding")
+                .run(ctx -> {
+                    assertThat(ctx).hasFailed();
+                    assertThat(ctx.getStartupFailure())
+                            .rootCause()
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessageContaining("Unknown jtokkit encoding");
+                });
+    }
+
+    @Test
+    void emptyEncodingPropertyFallsBackToCharsPerToken() {
+        // An empty string for the encoding (e.g. cleared in config) should be treated
+        // the same as unset — chars/4 default, no startup failure.
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.token-estimator-encoding=")
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(PromptTokenEstimator.class);
+                    assertThat(ctx.getBean(PromptTokenEstimator.class))
+                            .isInstanceOf(CharsPerTokenEstimator.class);
+                });
     }
 
     @Test

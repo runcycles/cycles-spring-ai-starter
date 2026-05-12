@@ -9,8 +9,12 @@ import io.runcycles.client.java.springai.observation.CyclesChatClientObservation
 import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
 import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
+import io.runcycles.client.java.springai.tokenizer.JtokkitPromptTokenEstimator;
 import io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator;
 import io.runcycles.client.java.springai.tool.CyclesToolGate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.util.ClassUtils;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -54,6 +58,10 @@ import org.springframework.context.annotation.Bean;
 @EnableConfigurationProperties(CyclesSpringAiProperties.class)
 public class CyclesSpringAiAutoConfiguration {
 
+    private static final Logger log = LoggerFactory.getLogger(CyclesSpringAiAutoConfiguration.class);
+
+    private static final String JTOKKIT_ENCODINGS_CLASS = "com.knuddels.jtokkit.Encodings";
+
     /** Default constructor used by Spring to instantiate the auto-configuration. */
     public CyclesSpringAiAutoConfiguration() {
         // Annotation-driven; nothing to initialize.
@@ -91,22 +99,42 @@ public class CyclesSpringAiAutoConfiguration {
     }
 
     /**
-     * Default {@link PromptTokenEstimator} bean — the chars-per-token heuristic
-     * ({@link CharsPerTokenEstimator}). Preserves v0.2.0 prompt-estimation behavior
-     * when {@code estimate-from-prompt=true}.
+     * Default {@link PromptTokenEstimator} bean.
      *
-     * <p>For tighter estimates, supply your own bean — typically a
-     * {@code JtokkitPromptTokenEstimator} (real BPE encoding for OpenAI models —
-     * see that class's javadoc for opt-in details) or a wrapper around your model
-     * provider's tokenizer. {@link ConditionalOnMissingBean} backs this default off
-     * when a user bean is registered.
+     * <p>Resolution order:
+     * <ol>
+     *   <li>If {@code cycles.spring-ai.token-estimator-encoding} is set AND jtokkit
+     *       is on the classpath, register a {@link JtokkitPromptTokenEstimator} with
+     *       the configured encoding — real BPE tokenization, significantly more
+     *       accurate than the chars/4 heuristic.</li>
+     *   <li>If the property is set BUT jtokkit isn't on the classpath: log a WARN
+     *       at startup and fall back to {@link CharsPerTokenEstimator} (the chars/4
+     *       heuristic). Users see this immediately at boot rather than getting
+     *       silently-wrong estimates at first call.</li>
+     *   <li>Otherwise: register {@link CharsPerTokenEstimator} (v0.2.0 default).</li>
+     * </ol>
      *
-     * @return the default chars-per-token estimator.
+     * <p>{@link ConditionalOnMissingBean} backs this off when a user-provided
+     * {@code PromptTokenEstimator} bean is registered.
+     *
+     * @param springAiProperties Spring AI integration configuration.
+     * @return the resolved estimator.
      */
     @Bean
     @ConditionalOnMissingBean
-    public PromptTokenEstimator cyclesPromptTokenEstimator() {
-        return new CharsPerTokenEstimator();
+    public PromptTokenEstimator cyclesPromptTokenEstimator(CyclesSpringAiProperties springAiProperties) {
+        String encoding = springAiProperties.getTokenEstimatorEncoding();
+        if (encoding == null || encoding.isBlank()) {
+            return new CharsPerTokenEstimator();
+        }
+        if (!ClassUtils.isPresent(JTOKKIT_ENCODINGS_CLASS, getClass().getClassLoader())) {
+            log.warn("cycles.spring-ai.token-estimator-encoding is set to '{}' but jtokkit "
+                    + "is not on the classpath. Add com.knuddels:jtokkit:1.1.0 (or supply "
+                    + "your own PromptTokenEstimator bean) to enable real BPE tokenization. "
+                    + "Falling back to the chars/4 heuristic for now.", encoding);
+            return new CharsPerTokenEstimator();
+        }
+        return new JtokkitPromptTokenEstimator(encoding);
     }
 
     @Bean
