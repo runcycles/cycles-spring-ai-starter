@@ -22,3 +22,21 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+/**/target
+/**/deploy
+/**/node_modules
+/**/build
+/**/.idea
+/**/*.iml
+/**/*.log
+/**/*_log
+/**/_dev
+/**/*_dev.*
+/**/temp
+/**/.vscode
+*.prefs
+cycles-spring-ai-starter/.project
+cycles-spring-ai-demo/.classpath
+cycles-spring-ai-demo/.project
+cycles-spring-ai-starter/.classpath

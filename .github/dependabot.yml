@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Maven dependencies — track each module separately since there is no root pom.
+  - package-ecosystem: "maven"
+    directories:
+      - "/cycles-spring-ai-starter"
+      - "/cycles-spring-ai-demo"
+    schedule:
+      interval: "weekly"
+
+  # GitHub Actions workflow refs.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

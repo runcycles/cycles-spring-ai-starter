@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: runcycles/.github/.github/workflows/ci-java.yml@main
+    with:
+      pom-file: cycles-spring-ai-starter/pom.xml
+      extra-steps: true
+      extra-pom-install: cycles-spring-ai-starter/pom.xml
+      extra-pom-compile: cycles-spring-ai-demo/pom.xml
