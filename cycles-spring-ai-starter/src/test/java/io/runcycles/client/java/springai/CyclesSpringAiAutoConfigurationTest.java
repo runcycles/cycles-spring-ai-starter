@@ -95,4 +95,38 @@ class CyclesSpringAiAutoConfigurationTest {
                     assertThat(props.getActionName()).isEqualTo("gpt-4o");
                 });
     }
+
+    @Test
+    void userProvidedAdvisorOverridesAutoConfigured() {
+        // App supplies its own CyclesBudgetAdvisor (e.g. subclassed for custom subject
+        // resolution). Auto-config must back off — exactly ONE advisor in the context,
+        // and it must be the user's. The customizer should pick up the user's advisor.
+        CyclesBudgetAdvisor userAdvisor = Mockito.mock(CyclesBudgetAdvisor.class);
+        contextRunner
+                .withBean("userCyclesBudgetAdvisor", CyclesBudgetAdvisor.class, () -> userAdvisor)
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx.getBean(CyclesBudgetAdvisor.class)).isSameAs(userAdvisor);
+                    // Customizer still wires (it depends on the now-user-supplied advisor).
+                    assertThat(ctx).hasBean("cyclesChatClientCustomizer");
+                });
+    }
+
+    @Test
+    void userProvidedCustomizerOverridesAutoConfigured() {
+        // App supplies its own cyclesChatClientCustomizer to control attachment behavior
+        // (e.g. different advisor ordering or additional advisor stacking). Name-based
+        // ConditionalOnMissingBean means our customizer backs off only when a same-named
+        // bean exists — not when other ChatClientCustomizer beans are present.
+        ChatClientCustomizer userCustomizer = builder -> { /* user's wiring */ };
+        contextRunner
+                .withBean("cyclesChatClientCustomizer", ChatClientCustomizer.class, () -> userCustomizer)
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(ChatClientCustomizer.class);
+                    assertThat(ctx.getBean("cyclesChatClientCustomizer", ChatClientCustomizer.class))
+                            .isSameAs(userCustomizer);
+                    // Auto-configured advisor still wires; only the customizer was overridden.
+                    assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
+                });
+    }
 }

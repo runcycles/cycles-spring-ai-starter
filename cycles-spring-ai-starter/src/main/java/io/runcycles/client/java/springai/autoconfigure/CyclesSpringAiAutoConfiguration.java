@@ -10,6 +10,7 @@ import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigureAfter;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -54,12 +55,18 @@ public class CyclesSpringAiAutoConfiguration {
     /**
      * Creates the Cycles budget advisor bean.
      *
+     * <p>{@link ConditionalOnMissingBean} causes this auto-configured advisor to back off
+     * when the application provides its own {@code CyclesBudgetAdvisor} bean — e.g. a
+     * subclass with custom subject resolution. Standard Spring Boot auto-configuration
+     * etiquette: defaults yield to user-provided beans.
+     *
      * @param cyclesClient        the Cycles HTTP client.
      * @param cyclesProperties    SDK-level configuration (subject defaults).
      * @param springAiProperties  Spring AI integration configuration.
      * @return the budget-gating call advisor.
      */
     @Bean
+    @ConditionalOnMissingBean
     public CyclesBudgetAdvisor cyclesBudgetAdvisor(CyclesClient cyclesClient,
                                                    CyclesProperties cyclesProperties,
                                                    CyclesSpringAiProperties springAiProperties) {
@@ -74,10 +81,17 @@ public class CyclesSpringAiAutoConfiguration {
      * {@code ChatClient} built from the auto-configured builder gates calls through
      * Cycles.
      *
-     * @param advisor the budget advisor from {@link #cyclesBudgetAdvisor}.
+     * <p>{@link ConditionalOnMissingBean} is keyed by <em>name</em> (not type) here:
+     * other Spring AI customizers in the context (chat memory, prompt augmentation, etc.)
+     * are additive, so we must NOT back off just because some other ChatClientCustomizer
+     * exists. A user replacing the Cycles attachment specifically can override this bean
+     * by declaring their own bean with the name {@code cyclesChatClientCustomizer}.
+     *
+     * @param advisor the budget advisor (user-provided or auto-configured).
      * @return a customizer that attaches the advisor as a default advisor on every ChatClient.
      */
     @Bean
+    @ConditionalOnMissingBean(name = "cyclesChatClientCustomizer")
     public ChatClientCustomizer cyclesChatClientCustomizer(CyclesBudgetAdvisor advisor) {
         return builder -> builder.defaultAdvisors(advisor);
     }
