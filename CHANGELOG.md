@@ -11,7 +11,7 @@ All v0.1.0 "known limitations" have been addressed on this branch.
 
 ### Added
 
-- **Streaming chat gating via `CyclesBudgetStreamAdvisor`.** Mirrors the `CyclesBudgetAdvisor` lifecycle for `chatClient.prompt(...).stream()` invocations. Reserves before subscribing to the upstream Flux; commits when the stream completes (using usage from the last chunk that carried it); releases on stream error or subscriber cancellation.
+- **Streaming chat gating via `CyclesBudgetStreamAdvisor`.** Mirrors the `CyclesBudgetAdvisor` lifecycle for `chatClient.prompt(...).stream()` invocations. The full pipeline runs inside `Flux.defer(...)`: reservation happens **per subscription** (no leak when the Flux is assembled but never subscribed; resubscribing produces a fresh reservation). Reserve failures (denial, transport) surface as `onError` rather than synchronous throws. Commit runs inside `concatWith(Mono.defer(...))` so fail-closed commit failures surface as `onError` to the subscriber — matching the non-streaming advisor's fail-fast contract. Releases on stream error, subscriber cancellation, or `chain.nextStream` throwing during assembly.
 - **Real `ChatResponse.Usage` extraction on commit** (applies to both the call and stream advisors). Reads token usage from the chat response after a successful call/completion and commits the actual cost instead of the pre-call estimate. Three modes:
   - `estimate-unit=TOKENS`: commits total tokens from `Usage.getTotalTokens()`.
   - `input-cost-per-token` and/or `output-cost-per-token` configured: commits `(promptTokens × inputRate) + (completionTokens × outputRate)`.
@@ -36,7 +36,7 @@ Now wires five beans (each with `@ConditionalOnMissingBean` so users can overrid
 
 - Reserve / commit / release plumbing extracted to `CyclesBudgetLifecycle`, shared by the call advisor, stream advisor, and tool callback. Promoted to `public` (marked **internal API** in javadoc) so the new tool package can reuse it. The lifecycle accepts explicit action-kind / action-name labels so tool reservations are distinguishable from chat reservations in audit history.
 - Build dependency: `spring-boot-dependencies` BOM imported alongside `spring-ai-bom` in `dependencyManagement` so `reactor-test` (used by the streaming tests) has a managed version.
-- Test bundle: 82 tests across 5 test classes; 100% instruction / 100% branch coverage on the bundle.
+- Test bundle: 93 tests across 6 test classes; 100% instruction / 100% branch coverage on the bundle.
 
 ## [0.1.0] — 2026-05-12
 

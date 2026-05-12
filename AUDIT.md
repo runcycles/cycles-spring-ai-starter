@@ -91,10 +91,13 @@ Future Cycles advisors (`CyclesAuthorityAdvisor` etc.) should follow the same pr
 
 ### Streaming chat (`chatClient.prompt(...).stream()`)
 
-1. Reservation step is identical to non-streaming — synchronous, before subscribing to the upstream Flux.
-2. On `ON_COMPLETE` → commit using usage from the **last emitted chunk** (most providers populate `Usage` only on the final chunk; some never do, in which case the fallback chain applies the same as non-streaming).
-3. On `ON_ERROR` → `POST .../release` with reason = `chat-stream-failed: <ExceptionClass>`.
-4. On `ON_CANCEL` (subscriber cancels) → `POST .../release` with reason = `chat-stream-cancelled`.
+The entire pipeline is wrapped in `Flux.defer(...)`, so all of the steps below execute on subscription (not at assembly). Each subscription to the returned Flux creates its own reservation; resubscribing produces a fresh reservation.
+
+1. Reservation step is identical to non-streaming, but executes on subscription. Reservation failures (denial, transport) surface as `onError` to the subscriber rather than as a synchronous throw from `adviseStream`.
+2. If `chain.nextStream(request)` throws during assembly after we reserved → release with reason = `chat-stream-assembly-failed: <ExceptionClass>` and re-throw (becomes `onError`).
+3. On natural completion of the upstream → commit using usage from the **last emitted chunk** (most providers populate `Usage` only on the final chunk; some never do, in which case the fallback chain applies the same as non-streaming). Commit runs inside `concatWith(Mono.defer(...))` before the subscriber observes terminal `onComplete`, so a commit failure in fail-closed mode surfaces as `onError` to the subscriber — same fail-fast behavior as the non-streaming advisor.
+4. On `onError` → release with reason = `chat-stream-failed: <ExceptionClass>`.
+5. On cancel (subscriber cancels) → release with reason = `chat-stream-cancelled`.
 
 ### Tool invocations (when wrapped via `CyclesToolGate.wrap`)
 

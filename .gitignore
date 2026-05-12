@@ -40,3 +40,8 @@ cycles-spring-ai-starter/.project
 cycles-spring-ai-demo/.classpath
 cycles-spring-ai-demo/.project
 cycles-spring-ai-starter/.classpath
+
+# flatten-maven-plugin output (resolved-CI-friendly pom written at process-resources;
+# Maven installs/deploys this instead of the source pom so published artifacts have a
+# literal <version> rather than ${revision}). Build artifact — never committed.
+/**/.flattened-pom.xml

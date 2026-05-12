@@ -124,15 +124,16 @@ The bean is auto-configured but NOT auto-attached — applying a convention has 
 | Commit on success | `POST /v1/reservations/{id}/commit` with actual amount | After `chain.nextCall` returns |
 | Release on error | `POST /v1/reservations/{id}/release` with reason | Catch block re-throws original after release |
 
-**Streaming chat** (`chatClient.prompt(...).stream()`) — same lifecycle adapted to the reactive signal model:
+**Streaming chat** (`chatClient.prompt(...).stream()`) — same lifecycle adapted to the reactive signal model. The entire pipeline is wrapped in `Flux.defer(...)` so reservation state is per-subscription (no leak when the Flux is assembled but never subscribed; resubscribing gets a fresh reservation):
 
 | Step | Cycles wire call | Reactor signal |
 |---|---|---|
-| Pre-stream | `POST /v1/reservations` | Synchronous, before subscribing to the upstream Flux |
+| Pre-stream | `POST /v1/reservations` | On subscription (inside `Flux.defer`). Reservation failures (denial, transport) surface as `onError` to the subscriber — the reactive-idiomatic shape; handle via `.onErrorResume(...)`. |
 | Stream | (advisor passes chunks through, tracking last seen) | `doOnNext(lastResponse::set)` |
-| Commit on complete | `POST /v1/reservations/{id}/commit` with usage from the last chunk | `doFinally` when terminal was `ON_COMPLETE` |
+| Commit on complete | `POST /v1/reservations/{id}/commit` with usage from the last chunk | `concatWith(Mono.defer(...))` after the upstream emits `onComplete`. Commit runs **before** the subscriber observes terminal completion, so a fail-closed commit failure correctly surfaces as `onError` (the way the non-streaming advisor fails the call). |
 | Release on error | `POST /v1/reservations/{id}/release` | `doOnError` |
 | Release on cancel | `POST /v1/reservations/{id}/release` | `doOnCancel` |
+| Release on assembly failure | `POST /v1/reservations/{id}/release` | If `chain.nextStream(request)` throws synchronously after we reserved, we release and re-throw. |
 
 **Tool invocations** (when wrapped via `CyclesToolGate.wrap`):
 
@@ -274,6 +275,24 @@ mvn -B verify --file cycles-spring-ai-demo/pom.xml
 ```
 
 (In Claude Code remote environments, use `mvn-proxy` instead of `mvn` — see [CLAUDE.md](./CLAUDE.md).)
+
+## Releasing
+
+The project uses Maven [CI-friendly versions](https://maven.apache.org/maven-ci-friendly.html) via the `${revision}` property, driven from `.mvn/maven.config` at the repo root. Both poms (starter + demo) declare `<version>${revision}</version>` and the demo's dep on the starter uses `${revision}` as well, so a version bump is a single-line edit.
+
+```text
+# .mvn/maven.config (single source of truth — applies to every mvn invocation)
+-Drevision=0.2.0-SNAPSHOT
+```
+
+To cut a release:
+
+1. Edit `.mvn/maven.config`: `-Drevision=0.2.0-SNAPSHOT` → `-Drevision=0.2.0`.
+2. Commit, tag `v0.2.0`, push the tag.
+3. The release workflow checks `mvn help:evaluate -Dexpression=project.version` against the tag — both now read `0.2.0` from `.mvn/maven.config`, so the gate passes.
+4. After the release ships, edit `.mvn/maven.config` again: `-Drevision=0.2.0` → `-Drevision=0.3.0-SNAPSHOT`. Commit, push.
+
+The `flatten-maven-plugin` (configured on both poms in `resolveCiFriendliesOnly` mode) substitutes `${revision}` with the resolved value at `process-resources` and produces a `.flattened-pom.xml` that gets installed/deployed. Sonatype Central requires a literal version in the published pom; non-CI-friendly properties (BOM versions, etc.) remain as `${...}` in the published pom and are interpolated against the same pom's `<properties>` block at consumer-resolve time — the standard behavior.
 
 ## License
 
