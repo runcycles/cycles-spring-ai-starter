@@ -4,6 +4,7 @@ import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.subject.SubjectResolver;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.StreamAdvisor;
@@ -48,10 +49,28 @@ public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
     private final CyclesBudgetLifecycle lifecycle;
 
     /**
-     * Constructs a streaming budget advisor wired to the Cycles HTTP client.
+     * Constructs a streaming budget advisor with an explicit subject resolver.
+     * Preferred constructor — wired by the auto-configuration.
      *
-     * @param cyclesClient        the Cycles HTTP client (provided by cycles-client-java-spring).
-     * @param cyclesProperties    the SDK-level properties (subject defaults).
+     * @param cyclesClient        the Cycles HTTP client.
+     * @param cyclesProperties    the SDK-level properties.
+     * @param springAiProperties  the Spring AI integration properties.
+     * @param subjectResolver     resolves the Cycles subject for each reservation.
+     */
+    public CyclesBudgetStreamAdvisor(CyclesClient cyclesClient,
+                                     CyclesProperties cyclesProperties,
+                                     CyclesSpringAiProperties springAiProperties,
+                                     SubjectResolver subjectResolver) {
+        this.lifecycle = new CyclesBudgetLifecycle(cyclesClient, cyclesProperties,
+                springAiProperties, subjectResolver);
+    }
+
+    /**
+     * Backward-compatible constructor that uses the default property-derived subject
+     * resolver. Kept for callers that instantiate the advisor directly.
+     *
+     * @param cyclesClient        the Cycles HTTP client.
+     * @param cyclesProperties    the SDK-level properties.
      * @param springAiProperties  the Spring AI integration properties.
      */
     public CyclesBudgetStreamAdvisor(CyclesClient cyclesClient,

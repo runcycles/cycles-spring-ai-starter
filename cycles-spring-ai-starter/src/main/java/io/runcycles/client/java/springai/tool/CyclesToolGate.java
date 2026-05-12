@@ -3,6 +3,8 @@ package io.runcycles.client.java.springai.tool;
 import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
+import io.runcycles.client.java.springai.subject.SubjectResolver;
 import org.springframework.ai.tool.ToolCallback;
 
 /**
@@ -31,20 +33,40 @@ public class CyclesToolGate {
     private final CyclesClient cyclesClient;
     private final CyclesProperties cyclesProperties;
     private final CyclesSpringAiProperties springAiProperties;
+    private final SubjectResolver subjectResolver;
 
     /**
-     * Constructs the tool gate factory.
+     * Constructs the tool gate factory with an explicit subject resolver.
      *
      * @param cyclesClient       Cycles HTTP client.
-     * @param cyclesProperties   SDK-level configuration (subject defaults).
+     * @param cyclesProperties   SDK-level configuration.
+     * @param springAiProperties Spring AI integration configuration.
+     * @param subjectResolver    resolves the Cycles subject for each tool reservation.
+     *                           Tool callbacks don't carry a {@code ChatClientRequest};
+     *                           the resolver is invoked with {@code null} on the tool path.
+     */
+    public CyclesToolGate(CyclesClient cyclesClient,
+                          CyclesProperties cyclesProperties,
+                          CyclesSpringAiProperties springAiProperties,
+                          SubjectResolver subjectResolver) {
+        this.cyclesClient = cyclesClient;
+        this.cyclesProperties = cyclesProperties;
+        this.springAiProperties = springAiProperties;
+        this.subjectResolver = subjectResolver;
+    }
+
+    /**
+     * Backward-compatible constructor — uses the property-derived default resolver.
+     *
+     * @param cyclesClient       Cycles HTTP client.
+     * @param cyclesProperties   SDK-level configuration.
      * @param springAiProperties Spring AI integration configuration.
      */
     public CyclesToolGate(CyclesClient cyclesClient,
                           CyclesProperties cyclesProperties,
                           CyclesSpringAiProperties springAiProperties) {
-        this.cyclesClient = cyclesClient;
-        this.cyclesProperties = cyclesProperties;
-        this.springAiProperties = springAiProperties;
+        this(cyclesClient, cyclesProperties, springAiProperties,
+                new PropertiesSubjectResolver(cyclesProperties));
     }
 
     /**
@@ -55,6 +77,7 @@ public class CyclesToolGate {
      *         commits on success, releases on exception.
      */
     public CyclesToolCallback wrap(ToolCallback toolCallback) {
-        return new CyclesToolCallback(toolCallback, cyclesClient, cyclesProperties, springAiProperties);
+        return new CyclesToolCallback(toolCallback, cyclesClient, cyclesProperties,
+                springAiProperties, subjectResolver);
     }
 }

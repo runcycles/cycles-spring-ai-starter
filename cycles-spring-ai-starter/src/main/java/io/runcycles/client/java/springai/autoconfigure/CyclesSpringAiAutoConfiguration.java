@@ -6,6 +6,8 @@ import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
+import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
+import io.runcycles.client.java.springai.subject.SubjectResolver;
 import io.runcycles.client.java.springai.tool.CyclesToolGate;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
@@ -68,12 +70,31 @@ public class CyclesSpringAiAutoConfiguration {
      * @param springAiProperties  Spring AI integration configuration.
      * @return the budget-gating call advisor.
      */
+    /**
+     * Default {@link SubjectResolver} bean — reads tenant/workspace/app from
+     * {@link CyclesProperties} on every call (v0.1.0 / v0.2.0 behavior).
+     *
+     * <p>Multi-tenant agents typically supply their own {@code SubjectResolver} bean
+     * to route attribution per request (e.g. tenant from an authenticated principal,
+     * a request header, or a thread-local). {@link ConditionalOnMissingBean} backs
+     * this default off when a user bean is registered.
+     *
+     * @param cyclesProperties SDK-level configuration carrying the subject defaults.
+     * @return the default property-derived resolver.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public SubjectResolver cyclesSubjectResolver(CyclesProperties cyclesProperties) {
+        return new PropertiesSubjectResolver(cyclesProperties);
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public CyclesBudgetAdvisor cyclesBudgetAdvisor(CyclesClient cyclesClient,
                                                    CyclesProperties cyclesProperties,
-                                                   CyclesSpringAiProperties springAiProperties) {
-        return new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties);
+                                                   CyclesSpringAiProperties springAiProperties,
+                                                   SubjectResolver subjectResolver) {
+        return new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties, subjectResolver);
     }
 
     /**
@@ -92,8 +113,9 @@ public class CyclesSpringAiAutoConfiguration {
     @ConditionalOnMissingBean
     public CyclesBudgetStreamAdvisor cyclesBudgetStreamAdvisor(CyclesClient cyclesClient,
                                                                CyclesProperties cyclesProperties,
-                                                               CyclesSpringAiProperties springAiProperties) {
-        return new CyclesBudgetStreamAdvisor(cyclesClient, cyclesProperties, springAiProperties);
+                                                               CyclesSpringAiProperties springAiProperties,
+                                                               SubjectResolver subjectResolver) {
+        return new CyclesBudgetStreamAdvisor(cyclesClient, cyclesProperties, springAiProperties, subjectResolver);
     }
 
     /**
@@ -140,8 +162,9 @@ public class CyclesSpringAiAutoConfiguration {
     @ConditionalOnMissingBean
     public CyclesToolGate cyclesToolGate(CyclesClient cyclesClient,
                                          CyclesProperties cyclesProperties,
-                                         CyclesSpringAiProperties springAiProperties) {
-        return new CyclesToolGate(cyclesClient, cyclesProperties, springAiProperties);
+                                         CyclesSpringAiProperties springAiProperties,
+                                         SubjectResolver subjectResolver) {
+        return new CyclesToolGate(cyclesClient, cyclesProperties, springAiProperties, subjectResolver);
     }
 
     /**

@@ -4,6 +4,7 @@ import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.subject.SubjectResolver;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisor;
@@ -37,11 +38,33 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
     private final CyclesBudgetLifecycle lifecycle;
 
     /**
-     * Constructs a budget advisor wired to the Cycles HTTP client and configuration.
+     * Constructs a budget advisor with an explicit subject resolver. Preferred
+     * constructor — wired by the auto-configuration with the user-provided
+     * {@link SubjectResolver} bean (defaults to a properties-derived one when no
+     * user bean is registered).
      *
      * @param cyclesClient        the Cycles HTTP client (provided by cycles-client-java-spring).
-     * @param cyclesProperties    the SDK-level properties (subject defaults: tenant/workspace/app).
+     * @param cyclesProperties    the SDK-level properties (subject defaults, fed into the
+     *                            default resolver when no user-provided resolver exists).
      * @param springAiProperties  the Spring AI integration properties (estimate, fail-open, etc.).
+     * @param subjectResolver     resolves the Cycles {@code Subject} for each reservation.
+     */
+    public CyclesBudgetAdvisor(CyclesClient cyclesClient,
+                               CyclesProperties cyclesProperties,
+                               CyclesSpringAiProperties springAiProperties,
+                               SubjectResolver subjectResolver) {
+        this.lifecycle = new CyclesBudgetLifecycle(cyclesClient, cyclesProperties,
+                springAiProperties, subjectResolver);
+    }
+
+    /**
+     * Backward-compatible constructor that uses the default property-derived subject
+     * resolver — equivalent to v0.1.0 / v0.2.0 behavior. Kept for callers that
+     * instantiate the advisor directly without going through the auto-configuration.
+     *
+     * @param cyclesClient        the Cycles HTTP client.
+     * @param cyclesProperties    the SDK-level properties.
+     * @param springAiProperties  the Spring AI integration properties.
      */
     public CyclesBudgetAdvisor(CyclesClient cyclesClient,
                                CyclesProperties cyclesProperties,

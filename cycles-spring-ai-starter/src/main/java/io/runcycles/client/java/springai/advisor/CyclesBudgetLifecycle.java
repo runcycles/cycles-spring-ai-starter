@@ -9,10 +9,11 @@ import io.runcycles.client.java.spring.model.CyclesResponse;
 import io.runcycles.client.java.spring.model.ReleaseRequest;
 import io.runcycles.client.java.spring.model.ReservationCreateRequest;
 import io.runcycles.client.java.spring.model.ReservationResult;
-import io.runcycles.client.java.spring.model.Subject;
 import io.runcycles.client.java.spring.model.Unit;
 import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
+import io.runcycles.client.java.springai.subject.SubjectResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClientRequest;
@@ -48,21 +49,44 @@ public final class CyclesBudgetLifecycle {
     private final CyclesClient cyclesClient;
     private final CyclesProperties cyclesProperties;
     private final CyclesSpringAiProperties springAiProperties;
+    private final SubjectResolver subjectResolver;
 
     /**
-     * Constructs the lifecycle helper. Public for cross-package access; not for direct
-     * user instantiation (use the advisor/tool classes that wrap it).
+     * Constructs the lifecycle helper with an explicit subject resolver. Public for
+     * cross-package access; not for direct user instantiation (use the advisor/tool
+     * classes that wrap it).
      *
      * @param cyclesClient       Cycles HTTP client.
      * @param cyclesProperties   SDK-level configuration.
+     * @param springAiProperties Spring AI integration configuration.
+     * @param subjectResolver    resolves the Cycles subject for each reservation.
+     *                           Must not be {@code null}.
+     */
+    public CyclesBudgetLifecycle(CyclesClient cyclesClient,
+                                 CyclesProperties cyclesProperties,
+                                 CyclesSpringAiProperties springAiProperties,
+                                 SubjectResolver subjectResolver) {
+        this.cyclesClient = cyclesClient;
+        this.cyclesProperties = cyclesProperties;
+        this.springAiProperties = springAiProperties;
+        this.subjectResolver = subjectResolver;
+    }
+
+    /**
+     * Convenience constructor that uses {@link PropertiesSubjectResolver} as the default
+     * subject resolver — equivalent to the v0.1.0 / v0.2.0 behavior of building the
+     * subject from {@link CyclesProperties} on every call. Kept for backward
+     * compatibility with code that constructs the lifecycle directly.
+     *
+     * @param cyclesClient       Cycles HTTP client.
+     * @param cyclesProperties   SDK-level configuration (also feeds the default resolver).
      * @param springAiProperties Spring AI integration configuration.
      */
     public CyclesBudgetLifecycle(CyclesClient cyclesClient,
                                  CyclesProperties cyclesProperties,
                                  CyclesSpringAiProperties springAiProperties) {
-        this.cyclesClient = cyclesClient;
-        this.cyclesProperties = cyclesProperties;
-        this.springAiProperties = springAiProperties;
+        this(cyclesClient, cyclesProperties, springAiProperties,
+                new PropertiesSubjectResolver(cyclesProperties));
     }
 
     /**
@@ -214,7 +238,7 @@ public final class CyclesBudgetLifecycle {
                                                               String actionName) {
         return ReservationCreateRequest.builder()
                 .idempotencyKey(UUID.randomUUID().toString())
-                .subject(buildSubject())
+                .subject(subjectResolver.resolveSubject(request))
                 .action(new Action(actionKind, actionName, null))
                 .estimate(buildReservationEstimate(request))
                 .build();
@@ -260,17 +284,6 @@ public final class CyclesBudgetLifecycle {
             }
         }
         return total;
-    }
-
-    private Subject buildSubject() {
-        return Subject.builder()
-                .tenant(cyclesProperties.getTenant())
-                .workspace(cyclesProperties.getWorkspace())
-                .app(cyclesProperties.getApp())
-                .workflow(cyclesProperties.getWorkflow())
-                .agent(cyclesProperties.getAgent())
-                .toolset(cyclesProperties.getToolset())
-                .build();
     }
 
     private Amount buildEstimateAmount() {
