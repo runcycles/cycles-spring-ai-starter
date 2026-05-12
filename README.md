@@ -16,11 +16,9 @@ Per-call lifecycle: **reserve → call → commit** on success, **reserve → ca
 <dependency>
     <groupId>io.runcycles</groupId>
     <artifactId>cycles-spring-ai-starter</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
 </dependency>
 ```
-
-> **Note on versions.** `0.1.0` is the latest **released** version on Maven Central. Features documented below under "What's new in `0.2.0-SNAPSHOT`" — tool gating via `CyclesToolGate`, the `CyclesChatClientObservationConvention`, prompt-based per-call estimates (`estimate-from-prompt`), per-token cost rates (`input-cost-per-token` / `output-cost-per-token`), and streaming gating via `CyclesBudgetStreamAdvisor` — are not in `0.1.0`. They land in the upcoming `0.2.0` release; until then they're available by building `cycles-spring-ai-starter:0.2.0-SNAPSHOT` from `main` and installing locally (`mvn -B install --file cycles-spring-ai-starter/pom.xml -DskipTests`).
 
 This dependency transitively pulls in [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) which provides the underlying HTTP client to the Cycles server.
 
@@ -152,9 +150,9 @@ Both chat advisors are registered automatically via Spring AI's `ChatClientCusto
 - **Spring Boot**: 3.5.x
 - **Spring AI**: 1.0.x (BOM-managed; tested compatible with 1.1.x via the post-scaffold Dependabot bump to 1.1.6)
 
-## What's new in `0.2.0-SNAPSHOT`
+## What's new in `0.2.0`
 
-All known limitations from v0.1.0 have been addressed:
+All known limitations from v0.1.0 are addressed:
 
 - ✅ **Streaming chat gating.** `CyclesBudgetStreamAdvisor` mirrors the lifecycle of the non-streaming advisor for `chatClient.prompt(...).stream()` invocations. Reserves before subscribing; commits on stream complete; releases on error or subscriber cancellation. Both advisors are auto-attached to the auto-configured `ChatClient.Builder`.
 - ✅ **Real `ChatResponse.Usage` extraction on commit** — when the LLM provider returns usage and either `input-cost-per-token` / `output-cost-per-token` are configured (or `estimate-unit=TOKENS`), the advisor commits the actual cost computed from tokens rather than the estimate. Falls back to estimate-as-actual when usage data is missing. Applies to both the call and stream advisors (the stream advisor uses the last chunk that carried usage).
