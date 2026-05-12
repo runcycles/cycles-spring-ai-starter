@@ -280,15 +280,17 @@ The project uses Maven [CI-friendly versions](https://maven.apache.org/maven-ci-
 
 ```text
 # .mvn/maven.config (single source of truth — applies to every mvn invocation)
--Drevision=0.2.0-SNAPSHOT
+-Drevision=X.Y.Z-SNAPSHOT
 ```
 
-To cut a release:
+The inline `<revision>` defaults in each pom's `<properties>` block should be kept in lockstep with `.mvn/maven.config` so the flattened pom that ships to Maven Central doesn't carry stale `<revision>` metadata. (The `flatten-maven-plugin`'s `resolveCiFriendliesOnly` mode resolves `<version>` but preserves the `<properties>` block as-is, so an IDE or build that bypasses `.mvn/maven.config` reads the inline default — and the published pom carries it verbatim.)
 
-1. Edit `.mvn/maven.config`: `-Drevision=0.2.0-SNAPSHOT` → `-Drevision=0.2.0`. Commit and push to `main`.
-2. Create a **GitHub Release** for the new version (e.g. via `gh release create v0.2.0 --generate-notes` or the GitHub UI). Creating the release also creates the tag if it doesn't exist. The publish workflow triggers on `release: [created]` — **pushing a bare tag does not trigger publishing**, only the release event does.
-3. The publish workflow checks `mvn help:evaluate -Dexpression=project.version` against the tag — both now read `0.2.0` from `.mvn/maven.config`, so the version-vs-tag gate passes and the artifact deploys to Maven Central.
-4. After the release ships, edit `.mvn/maven.config` again: `-Drevision=0.2.0` → `-Drevision=0.3.0-SNAPSHOT`. Commit, push.
+To cut a release (concrete example: cutting `X.Y.Z` from a `X.Y.Z-SNAPSHOT` dev branch):
+
+1. Edit `.mvn/maven.config`: `-Drevision=X.Y.Z-SNAPSHOT` → `-Drevision=X.Y.Z`. Also bump the inline `<revision>` defaults in both poms to `X.Y.Z` to match. Commit and push to `main`.
+2. Create a **GitHub Release** for the new version (e.g. via `gh release create vX.Y.Z --generate-notes` or the GitHub UI). Creating the release also creates the tag if it doesn't exist. The publish workflow triggers on `release: [created]` — **pushing a bare tag does not trigger publishing**, only the release event does.
+3. The publish workflow checks `mvn help:evaluate -Dexpression=project.version` against the tag — both now read `X.Y.Z` from `.mvn/maven.config`, so the version-vs-tag gate passes and the artifact deploys to Maven Central.
+4. After the release ships, bump `.mvn/maven.config` and the inline pom `<revision>` defaults to the next SNAPSHOT (e.g. `X.Y.Z+1-SNAPSHOT` or `X.Y+1.0-SNAPSHOT`). Commit, push.
 
 To test a release build without publishing (e.g. to verify GPG signing works on a new key): trigger the publish workflow via `workflow_dispatch` from the Actions tab. That runs the `test-release-build` job only — no deploy.
 
