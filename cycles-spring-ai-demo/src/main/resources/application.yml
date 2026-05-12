@@ -1,0 +1,14 @@
+spring:
+  application:
+    name: cycles-spring-ai-demo
+  ai:
+    openai:
+      # Set OPENAI_API_KEY in your env, or override here for local testing.
+      api-key: ${OPENAI_API_KEY:demo-key-not-set}
+
+cycles:
+  spring-ai:
+    enabled: true
+    budget-id: demo-budget
+    server-url: http://localhost:8080
+    fail-open: true   # local demo: tolerate Cycles server being absent
