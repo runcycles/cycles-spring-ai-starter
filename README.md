@@ -86,7 +86,7 @@ The advisor is registered automatically via Spring AI's `ChatClientCustomizer` m
 
 - **Java**: 21+
 - **Spring Boot**: 3.5.x
-- **Spring AI**: 1.0.x (1.1.x compatible pending verification)
+- **Spring AI**: 1.0.x (BOM-managed; tested compatible with 1.1.x via the post-scaffold Dependabot bump to 1.1.6)
 
 ## Known limitations (v0.1.0)
 

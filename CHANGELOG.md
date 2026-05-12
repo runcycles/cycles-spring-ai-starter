@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (no entries pending — see "Known limitations (v0.1.0)" in [README.md](./README.md) for v0.2 candidates)
 
-## [0.1.0] — TBD
+## [0.1.0] — 2026-05-12
 
 ### Added
 - `CyclesBudgetAdvisor` — Spring AI `CallAdvisor` that performs the reserve → call → commit/release lifecycle against the Cycles server for every `chatClient.prompt(...).call()` invocation. Pre-call denials throw `CyclesBudgetDeniedException` before the LLM is contacted. Reserves the estimate before delegating to `chain.nextCall`; commits the estimate as actual on success; releases the reservation on chain exception.
@@ -29,5 +29,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Dependencies
 - Spring Boot 3.5.3
-- Spring AI 1.0.0 (BOM-managed)
+- Spring AI 1.0.0 (BOM-managed; verified compatible up through 1.1.6 via Dependabot bump)
 - `io.runcycles:cycles-client-java-spring:0.2.2` (transitive, provides the HTTP client)
