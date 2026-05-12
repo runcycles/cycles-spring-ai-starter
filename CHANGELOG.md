@@ -31,7 +31,7 @@ Now wires seven beans (each `@ConditionalOnMissingBean` so users can override): 
 - `CyclesBudgetLifecycle.buildSubject()` removed; delegates to the injected `SubjectResolver`. The old inline subject-building logic now lives in `PropertiesSubjectResolver`.
 - `CyclesBudgetLifecycle.extractPromptCharCount()` removed; delegates to the injected `PromptTokenEstimator`. The chars/4 logic now lives in `CharsPerTokenEstimator`.
 - `CyclesChatClientObservationConvention.getHighCardinalityKeyValues()` no longer calls `super` — Spring AI's default impl NPEs on insufficiently-stubbed contexts and emits nothing we currently care about. Documented in the source.
-- Test bundle: 142 tests across 12 test classes (up from 93 in v0.2.0). Bundle coverage gate met (`mvn -B clean verify` passes the jacoco `check` rule with 24 missed / 1108 covered instructions, 6 missed / 102 covered branches; full breakdown in TEST_COVERAGE_GAPS.md).
+- Test bundle: 142 tests across 12 test classes (up from 93 in v0.2.0). Bundle coverage gate met (`mvn -B clean verify` passes the jacoco `check` rule with 24 missed / 1418 covered instructions, 6 missed / 132 covered branches; full breakdown in TEST_COVERAGE_GAPS.md).
 
 ### Dependencies
 

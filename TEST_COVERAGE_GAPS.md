@@ -4,7 +4,7 @@ This file tracks known coverage shortfalls against the project's **95%-or-higher
 
 ## Current state (0.3.0)
 
-- Library bundle (`cycles-spring-ai-starter`): bundle coverage gate (`BUNDLE INSTRUCTION ≥ 95%`) met. Latest `mvn -B clean verify`: **24 missed / 1108 covered instructions (98%)**, **6 missed / 102 covered branches (94%)** across 12 classes.
+- Library bundle (`cycles-spring-ai-starter`): bundle coverage gate (`BUNDLE INSTRUCTION ≥ 95%`) met. Latest `mvn -B clean verify`: **24 missed / 1418 covered instructions (98.3%)**, **6 missed / 132 covered branches (95.7%)** across 12 classes.
 - Demo module (`cycles-spring-ai-demo`): not subject to the rule (not published).
 - Test count: **142 tests across 12 test classes** — call advisor + 2 (subject resolver / token estimator integration), stream advisor, tool callback, tool gate, auto-config, observation convention, properties subject resolver, chars-per-token estimator, jtokkit estimator, end-to-end integration.
 
@@ -26,7 +26,7 @@ Three coverage gaps remain, all documented in the code and accepted as such. Eac
 2. **`CyclesSpringAiAutoConfiguration.cyclesPromptTokenEstimator` jtokkit-absent fallback** (~8 instructions, 1 branch). Fires when the `cycles.spring-ai.token-estimator-encoding` property is set but `com.knuddels.jtokkit.Encodings` isn't on the classpath. Closing this would require a custom `ClassLoader` that hides the optional jtokkit jar. The path is exercised in production deploys where someone enables the property without adding the optional dep; the WARN log surfaces the misconfig at startup.
 3. **`CyclesChatClientObservationConvention` defensive null-guards** (~4 instructions, 2 branches). `extractReservationId` returns null if `context`, `getRequest()`, or `request.context()` ever returns null. Spring AI's real contract is that `ChatClientObservationContext` always has a non-null request with a non-null mutable context map, so these branches are unreachable in production. Kept for defensive shape.
 
-Absolute counts (vs ~1100 instructions and ~100 branches in the bundle): 24 missed instructions, 6 missed branches. Bundle gate at INSTRUCTION ≥ 95% requires at most 56 missed instructions — current state is well within budget.
+Absolute counts (vs ~1440 instructions and ~140 branches in the bundle): 24 missed instructions, 6 missed branches. Bundle gate at INSTRUCTION ≥ 95% allows up to 72 missed instructions (5% of 1442) — current 24 is well within budget.
 
 ## Test strategy notes
 
