@@ -8,17 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased] — 0.2.0-SNAPSHOT
 
 ### Added
-- **Real `ChatResponse.Usage` extraction on commit.** `CyclesBudgetAdvisor` now reads token usage from the chat response after a successful call and commits the actual cost instead of the pre-call estimate. Three modes:
+- **Streaming chat gating via `CyclesBudgetStreamAdvisor`.** New advisor mirrors the `CyclesBudgetAdvisor` lifecycle for `chatClient.prompt(...).stream()` invocations. Reserves before subscribing to the upstream Flux; commits when the stream completes (using usage from the last chunk that carried it); releases on stream error or subscriber cancellation.
+- **Real `ChatResponse.Usage` extraction on commit** (applies to both the call and stream advisors). Reads token usage from the chat response after a successful call/completion and commits the actual cost instead of the pre-call estimate. Three modes:
   - `estimate-unit=TOKENS`: commits total tokens from `Usage.getTotalTokens()`.
   - `input-cost-per-token` and/or `output-cost-per-token` configured: commits `(promptTokens × inputRate) + (completionTokens × outputRate)`.
   - Otherwise: continues to commit the estimate as actual (v0.1.0-compatible fallback).
 - Two new configuration properties:
-  - `cycles.spring-ai.input-cost-per-token` (long, default 0) — per-input-token cost in the configured estimate unit.
-  - `cycles.spring-ai.output-cost-per-token` (long, default 0) — per-output-token cost.
-- Both new properties reject negative values at config-binding time (same pattern as `default-estimate`).
+  - `cycles.spring-ai.input-cost-per-token` (long, default 0).
+  - `cycles.spring-ai.output-cost-per-token` (long, default 0).
+- Both new properties reject negative values at config-binding time.
+- Auto-configuration registers both `CyclesBudgetAdvisor` and `CyclesBudgetStreamAdvisor` beans (both with `@ConditionalOnMissingBean`); the `ChatClientCustomizer` attaches both via `builder.defaultAdvisors(callAdvisor, streamAdvisor)`.
+
+### Internal
+- Reserve / commit / release plumbing extracted to a package-private `CyclesBudgetLifecycle` helper, shared by the call and stream advisors. The two public advisor classes are thin wrappers that supply the right reactive vs imperative glue.
+- Build dependency: `spring-boot-dependencies` BOM imported alongside `spring-ai-bom` in `dependencyManagement` so `reactor-test` (used by the streaming tests) has a managed version.
 
 ### Still pending for v0.2
-- Streaming chat (`StreamAdvisor`) — non-streaming calls only so far.
 - Per-call estimate derivation from prompt token count — estimate is still a fixed constant.
 - `ToolCallback` decoration (tool-level authority gates).
 - `ObservationConvention` (richer audit-trail attribution).

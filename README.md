@@ -92,14 +92,14 @@ The advisor is registered automatically via Spring AI's `ChatClientCustomizer` m
 
 These are *deliberate* deferrals to a future release, not accidents:
 
-- **Streaming calls are not covered.** This advisor implements `CallAdvisor` only. Streaming invocations (`chatClient.prompt(...).stream()`) use Spring AI's separate `StreamAdvisor` plumbing and bypass Cycles entirely. A `CyclesBudgetStreamAdvisor` is in the v0.2 roadmap.
 - **Estimate is a fixed constant.** Every call reserves `cycles.spring-ai.default-estimate` units. A future release will derive a per-call estimate from prompt token count + model pricing.
 - **No `ToolCallback` decoration.** Action-authority gates on tool calls are in the v0.2 roadmap.
 - **No `ObservationConvention`.** Richer audit-trail attribution beyond the reservation lifecycle is in the v0.2 roadmap.
 
 ### Already addressed in `0.2.0-SNAPSHOT` (post-v0.1.0)
 
-- ✅ **Real `ChatResponse.Usage` extraction on commit** — when the LLM provider returns usage and either `input-cost-per-token` / `output-cost-per-token` are configured (or `estimate-unit=TOKENS`), the advisor commits the actual cost computed from tokens rather than the estimate. Falls back to estimate-as-actual when usage data is missing.
+- ✅ **Streaming chat gating.** `CyclesBudgetStreamAdvisor` mirrors the lifecycle of the non-streaming advisor for `chatClient.prompt(...).stream()` invocations. Reserves before subscribing; commits on stream complete; releases on error or subscriber cancellation. Both advisors are auto-attached to the auto-configured `ChatClient.Builder`.
+- ✅ **Real `ChatResponse.Usage` extraction on commit** — when the LLM provider returns usage and either `input-cost-per-token` / `output-cost-per-token` are configured (or `estimate-unit=TOKENS`), the advisor commits the actual cost computed from tokens rather than the estimate. Falls back to estimate-as-actual when usage data is missing. Applies to both the call and stream advisors (the stream advisor uses the last chunk that carried usage).
 
 ## Configuration reference
 

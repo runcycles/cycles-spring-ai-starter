@@ -17,7 +17,9 @@ The Spring AI starter does not own its own protocol — it delegates to the Cycl
 |---|---|---|
 | Auto-configuration | `io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiAutoConfiguration` | API stable |
 | Configuration properties | `io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties` (prefix: `cycles.spring-ai`) | API stable |
-| Budget advisor | `io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor` | API stable; behavior may extend (e.g. per-call estimates, token-usage commit) without breaking existing callers |
+| Budget advisor (non-streaming) | `io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor` | API stable; behavior may extend (e.g. per-call estimates) without breaking existing callers |
+| Budget advisor (streaming) | `io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor` | **Added in 0.2.0-SNAPSHOT.** Mirrors the call advisor's lifecycle for `ChatClient.stream()` invocations |
+| Lifecycle helper | `io.runcycles.client.java.springai.advisor.CyclesBudgetLifecycle` (package-private) | Internal — shared reserve / commit / release plumbing |
 | Denial exception | `io.runcycles.client.java.springai.CyclesBudgetDeniedException` | API stable |
 
 ## Property keys (v0.1.0)

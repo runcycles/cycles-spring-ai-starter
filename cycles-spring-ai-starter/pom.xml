@@ -52,6 +52,15 @@
 
     <dependencyManagement>
         <dependencies>
+            <!-- spring-boot-dependencies first so any explicit downstream pins win. Manages
+                 reactor-core / reactor-test versions (needed for the streaming advisor's tests). -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring.boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.ai</groupId>
                 <artifactId>spring-ai-bom</artifactId>
@@ -112,6 +121,13 @@
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>mockwebserver</artifactId>
             <version>5.3.2</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Reactor StepVerifier for testing the streaming advisor's Flux lifecycle. -->
+        <dependency>
+            <groupId>io.projectreactor</groupId>
+            <artifactId>reactor-test</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

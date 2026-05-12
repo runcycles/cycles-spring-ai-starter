@@ -3,6 +3,7 @@ package io.runcycles.client.java.springai;
 import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
+import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiAutoConfiguration;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import org.junit.jupiter.api.Test;
@@ -37,6 +38,7 @@ class CyclesSpringAiAutoConfigurationTest {
     void wiresAdvisorAndCustomizerWhenEnabledByDefault() {
         contextRunner.run(ctx -> {
             assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
+            assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
             assertThat(ctx).hasSingleBean(ChatClientCustomizer.class);
             CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
             assertThat(props.isEnabled()).isTrue();
@@ -49,17 +51,19 @@ class CyclesSpringAiAutoConfigurationTest {
                 .withPropertyValues("cycles.spring-ai.enabled=false")
                 .run(ctx -> {
                     assertThat(ctx).doesNotHaveBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx).doesNotHaveBean(CyclesBudgetStreamAdvisor.class);
                     assertThat(ctx).doesNotHaveBean(ChatClientCustomizer.class);
                 });
     }
 
     @Test
     void doesNotWireWithoutCyclesClientBean() {
-        // No CyclesClient → @ConditionalOnBean fails → advisor not registered.
+        // No CyclesClient → @ConditionalOnBean fails → advisors not registered.
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(CyclesSpringAiAutoConfiguration.class))
                 .run(ctx -> {
                     assertThat(ctx).doesNotHaveBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx).doesNotHaveBean(CyclesBudgetStreamAdvisor.class);
                     assertThat(ctx).doesNotHaveBean(ChatClientCustomizer.class);
                 });
     }
@@ -100,18 +104,20 @@ class CyclesSpringAiAutoConfigurationTest {
     }
 
     @Test
-    void customizerAttachesAdvisorToChatClientBuilder() {
+    void customizerAttachesBothCallAndStreamAdvisorsToChatClientBuilder() {
         // Exercise the lambda body of cyclesChatClientCustomizer — verify it actually
-        // calls builder.defaultAdvisors(advisor). Without this test the lambda is
-        // registered as a bean but never invoked, leaving its body uncovered.
+        // calls builder.defaultAdvisors(callAdvisor, streamAdvisor). Without this test
+        // the lambda is registered as a bean but never invoked, leaving its body
+        // uncovered (and a subtle regression risk if the wiring shape changes).
         contextRunner.run(ctx -> {
             ChatClientCustomizer customizer = ctx.getBean("cyclesChatClientCustomizer", ChatClientCustomizer.class);
-            CyclesBudgetAdvisor advisor = ctx.getBean(CyclesBudgetAdvisor.class);
+            CyclesBudgetAdvisor callAdvisor = ctx.getBean(CyclesBudgetAdvisor.class);
+            CyclesBudgetStreamAdvisor streamAdvisor = ctx.getBean(CyclesBudgetStreamAdvisor.class);
             ChatClient.Builder builder = mock(ChatClient.Builder.class);
 
             customizer.customize(builder);
 
-            verify(builder).defaultAdvisors(advisor);
+            verify(builder).defaultAdvisors(callAdvisor, streamAdvisor);
         });
     }
 
@@ -127,6 +133,20 @@ class CyclesSpringAiAutoConfigurationTest {
                     assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
                     assertThat(ctx.getBean(CyclesBudgetAdvisor.class)).isSameAs(userAdvisor);
                     // Customizer still wires (it depends on the now-user-supplied advisor).
+                    assertThat(ctx).hasBean("cyclesChatClientCustomizer");
+                });
+    }
+
+    @Test
+    void userProvidedStreamAdvisorOverridesAutoConfigured() {
+        // Symmetric to the call-advisor override — user-supplied stream advisor takes
+        // precedence and the customizer picks it up.
+        CyclesBudgetStreamAdvisor userStreamAdvisor = Mockito.mock(CyclesBudgetStreamAdvisor.class);
+        contextRunner
+                .withBean("userCyclesBudgetStreamAdvisor", CyclesBudgetStreamAdvisor.class, () -> userStreamAdvisor)
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
+                    assertThat(ctx.getBean(CyclesBudgetStreamAdvisor.class)).isSameAs(userStreamAdvisor);
                     assertThat(ctx).hasBean("cyclesChatClientCustomizer");
                 });
     }
