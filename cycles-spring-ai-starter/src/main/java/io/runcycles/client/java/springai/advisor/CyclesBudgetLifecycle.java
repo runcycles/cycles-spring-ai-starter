@@ -186,6 +186,9 @@ public final class CyclesBudgetLifecycle {
      * Release a reservation, swallowing any failure (transport or HTTP). The reservation
      * will TTL-expire on the server anyway, so a failed release is a logging concern,
      * not a runtime one.
+     *
+     * @param reservationId the reservation to release.
+     * @param reason        free-form reason string captured in audit history.
      */
     public void releaseQuietly(String reservationId, String reason) {
         ReleaseRequest release = ReleaseRequest.builder()
