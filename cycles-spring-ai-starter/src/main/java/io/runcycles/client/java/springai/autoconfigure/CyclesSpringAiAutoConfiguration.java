@@ -1,11 +1,13 @@
 package io.runcycles.client.java.springai.autoconfigure;
 
+import io.runcycles.client.java.spring.autoconfigure.CyclesAutoConfiguration;
 import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.AutoConfigureAfter;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -19,6 +21,12 @@ import org.springframework.context.annotation.Bean;
  * {@link CyclesClient} bean exists (provided by {@code cycles-client-java-spring}'s
  * auto-configuration), and {@code cycles.spring-ai.enabled} is true (default).
  *
+ * <p>{@link AutoConfigureAfter} guarantees Spring evaluates this auto-config *after*
+ * {@link CyclesAutoConfiguration} has run, so the {@link ConditionalOnBean} check
+ * against {@link CyclesClient} sees the bean that the SDK registers. Without this
+ * ordering hint, auto-config evaluation order is non-deterministic and the integration
+ * could silently fail to wire on some classpath orderings.
+ *
  * <p>Wires two beans:
  * <ul>
  *   <li>{@link CyclesBudgetAdvisor} — the call advisor itself.</li>
@@ -31,6 +39,7 @@ import org.springframework.context.annotation.Bean;
  * </ul>
  */
 @AutoConfiguration
+@AutoConfigureAfter(CyclesAutoConfiguration.class)
 @ConditionalOnClass({ ChatClient.class, ChatClientCustomizer.class })
 @ConditionalOnBean(CyclesClient.class)
 @ConditionalOnProperty(prefix = "cycles.spring-ai", name = "enabled", havingValue = "true", matchIfMissing = true)

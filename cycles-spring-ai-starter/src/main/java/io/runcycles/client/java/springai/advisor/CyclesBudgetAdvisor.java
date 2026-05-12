@@ -181,7 +181,13 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
                     "Cycles commit failed for reservation " + reservationId + " (fail-open=false)",
                     transportFailure);
         }
-        if (!response.is2xx() && !springAiProperties.isFailOpen()) {
+        if (!response.is2xx()) {
+            if (springAiProperties.isFailOpen()) {
+                log.warn("Cycles commit HTTP failure status={} for reservation {} "
+                                + "(fail-open=true; ignoring): body={}",
+                        response.getStatus(), reservationId, response.getBody());
+                return;
+            }
             throw new IllegalStateException(
                     "Cycles commit HTTP failure status=" + response.getStatus()
                             + " for reservation " + reservationId);

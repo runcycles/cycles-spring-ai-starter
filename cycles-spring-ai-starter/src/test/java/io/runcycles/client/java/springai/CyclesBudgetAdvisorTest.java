@@ -238,6 +238,21 @@ class CyclesBudgetAdvisorTest {
                 .hasMessageContaining("commit HTTP failure");
     }
 
+    @Test
+    void commitHttpFailureSwallowedWhenFailOpen() {
+        springAiProperties.setFailOpen(true);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(500, "boom", Map.of()));
+
+        ChatClientResponse result = advisor.adviseCall(request, chain);
+
+        assertThat(result).isSameAs(response);
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
     // ---- Release on chain exception -------------------------------------
 
     @Test
