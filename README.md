@@ -150,6 +150,15 @@ Both chat advisors are registered automatically via Spring AI's `ChatClientCusto
 - **Spring Boot**: 3.5.x
 - **Spring AI**: 1.0.x (BOM-managed; tested compatible with 1.1.x via the post-scaffold Dependabot bump to 1.1.6)
 
+## What's new in `0.3.0`
+
+Three new extension points and a trace-correlation tag, on top of v0.2.0's full feature surface:
+
+- ✅ **Pluggable `SubjectResolver`** — multi-tenant agents can route the Cycles `Subject` per call (tenant from `@AuthenticationPrincipal`, request header, thread-local, etc.) instead of using the static property defaults. Register a `SubjectResolver` bean and the auto-config's default backs off via `@ConditionalOnMissingBean`. See [Extension points](#extension-points) below.
+- ✅ **Pluggable `PromptTokenEstimator`** — replace the v0.2.0 `chars / 4` heuristic with real BPE tokenization. The starter ships a jtokkit-based estimator (`cl100k_base` / `o200k_base` etc. — opt in via `cycles.spring-ai.token-estimator-encoding`) or you can supply your own bean for provider-specific tokenizers.
+- ✅ **`cycles.reservation_id` on chat traces** — the `CyclesChatClientObservationConvention` now emits the active reservation id as a high-cardinality KeyValue on every chat-client observation, enabling trace ↔ Cycles reservation correlation in your tracing backend. Opt-out via `cycles.spring-ai.emit-reservation-id-on-trace=false`.
+- ✅ **End-to-end integration test** — the test bundle now boots a Spring context with the real auto-configuration and verifies the advisor attachment + reserve/commit lifecycle through a stub `ChatModel`. Closes the "what if a regression breaks the wiring but unit tests still pass?" gap.
+
 ## What's new in `0.2.0`
 
 All known limitations from v0.1.0 are addressed:
@@ -175,8 +184,83 @@ All known limitations from v0.1.0 are addressed:
 | `cycles.spring-ai.estimate-from-prompt` | `false` | When `true` and at least one cost-per-token rate is set, sizes the pre-call reservation from the prompt char count (`chars / 4` × combined rate). Falls back to `default-estimate` when the prompt is empty or rates are zero. |
 | `cycles.spring-ai.tool-action-kind` | `tool.call` | Action.kind label reported for `CyclesToolCallback`-wrapped tool invocations (distinct from chat's `action-kind`). |
 | `cycles.spring-ai.tool-action-name-prefix` | `spring-ai-tool:` | Prefix prepended to the wrapped tool's name to produce the action.name label (e.g. `spring-ai-tool:get_weather`). |
+| `cycles.spring-ai.token-estimator-encoding` | _unset_ | When set AND jtokkit is on the classpath, swaps the default chars/4 prompt-token estimator for real BPE encoding. Values: `cl100k_base` (gpt-3.5-turbo, gpt-4), `o200k_base` (gpt-4o family), `p50k_base` / `p50k_edit` / `r50k_base` (older models). Requires adding `com.knuddels:jtokkit:1.1.0` to your app's pom; the dep is `optional=true` on this starter. |
+| `cycles.spring-ai.emit-reservation-id-on-trace` | `true` | When the `CyclesChatClientObservationConvention` is applied, emit the active `cycles.reservation_id` as a high-cardinality KeyValue on chat-client observations (enables trace ↔ reservation correlation). Set false to omit when your tracing backend charges by unique tag-value combinations. |
 
 Connection + subject properties (`cycles.base-url`, `cycles.api-key`, `cycles.tenant`, etc.) come from [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) — see that repo's README for the full list.
+
+## Extension points
+
+The starter exposes three pluggable beans so you can replace the defaults without touching the advisor code. Each backs off via `@ConditionalOnMissingBean`, so registering your own bean is the only thing you need to do.
+
+### Per-call subject routing — `SubjectResolver`
+
+By default the starter reads tenant/workspace/app/etc. from `cycles.*` properties on every reservation, so every call from a given app gets the same Cycles `Subject`. Multi-tenant SaaS agents need per-request attribution. Register a `SubjectResolver` bean and the advisor calls it per request:
+
+```java
+@Bean
+public SubjectResolver tenantAwareSubjectResolver(CyclesProperties defaults) {
+    return request -> {
+        var auth = SecurityContextHolder.getContext().getAuthentication();
+        String tenant = (auth != null && auth.isAuthenticated()) ? auth.getName() : defaults.getTenant();
+        return Subject.builder()
+                .tenant(tenant)
+                .workspace(defaults.getWorkspace())
+                .app(defaults.getApp())
+                .build();
+    };
+}
+```
+
+The `request` parameter is the originating `ChatClientRequest` (or `null` on the tool-gating path — tool callbacks don't carry a request). Implementations should handle `null` defensively, typically by falling back to the property defaults.
+
+### Custom prompt-token estimation — `PromptTokenEstimator`
+
+Default is `CharsPerTokenEstimator` (the v0.2.0 `chars / 4` heuristic). For tighter estimates:
+
+**Option 1: jtokkit (real OpenAI BPE encoding).** Set the property:
+
+```yaml
+cycles:
+  spring-ai:
+    estimate-from-prompt: true
+    input-cost-per-token: 25
+    output-cost-per-token: 100
+    token-estimator-encoding: cl100k_base   # or o200k_base for gpt-4o family
+```
+
+Add the jtokkit dep to your app pom (it's `optional=true` on this starter so it's not pulled transitively):
+
+```xml
+<dependency>
+    <groupId>com.knuddels</groupId>
+    <artifactId>jtokkit</artifactId>
+    <version>1.1.0</version>
+</dependency>
+```
+
+When the property is set without the dep on the classpath, the starter logs a WARN at app startup and falls back to chars/4 — you'll see the misconfig immediately, not at first call.
+
+**Option 2: custom bean.** Register your own `PromptTokenEstimator` for provider-specific tokenizers or domain-aware heuristics:
+
+```java
+@Bean
+public PromptTokenEstimator anthropicTokenEstimator() {
+    return request -> /* count tokens using Anthropic's tokenizer */;
+}
+```
+
+### Trace ↔ reservation correlation
+
+The `CyclesChatClientObservationConvention` (Quick Start step 5) emits `cycles.reservation_id` as a high-cardinality KeyValue on every chat-client observation when applied. The advisor stores the reservation id in `request.context()` after a successful reserve; the convention reads it at observation-stop time. Disable via:
+
+```yaml
+cycles:
+  spring-ai:
+    emit-reservation-id-on-trace: false
+```
+
+The low-cardinality Cycles attribution tags (`cycles.tenant`, `cycles.workspace`, etc.) are always emitted by the convention regardless of this setting.
 
 ## Relationship to cycles-spring-boot-starter
 
@@ -192,7 +276,7 @@ The two Java integrations are **complementary, not competing** — they target d
 | Granularity | Method-level, explicit opt-in | Framework-level, transparent |
 | Call-site changes | Yes — annotate methods with `@Cycles` | No — wired automatically |
 | Estimate computation | SpEL: `@Cycles("#tokens * 10")` (dynamic per-call) | `default-estimate`, or prompt-char × token-rate when `estimate-from-prompt=true` |
-| Subject routing | SpEL: can pull tenant from method args | Constant from `cycles.tenant/workspace/app` properties |
+| Subject routing | SpEL: can pull tenant from method args | Property defaults, or per-call via a custom `SubjectResolver` bean (see [Extension points](#extension-points)) |
 | Knows about LLMs? | No — generic | Yes — Spring AI ChatClient specific |
 | Scope | Any cost-incurring Java code | Only Spring AI chat calls |
 

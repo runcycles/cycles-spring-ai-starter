@@ -30,6 +30,17 @@ The Spring AI starter does not own its own protocol — it delegates to the Cycl
 | Tool gate factory | `io.runcycles.client.java.springai.tool.CyclesToolGate` | Auto-configured factory: users call `cyclesToolGate.wrap(myTool)` to opt in to per-tool gating. Not auto-applied to tools |
 | Observation convention | `io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention` | Extends Spring AI's `DefaultChatClientObservationConvention` to append low-cardinality `cycles.*` attribution tags to chat-client traces. Auto-configured as a bean but not auto-attached — users apply via `chatClientBuilder.observationConvention(...)` |
 
+## Public surface added in 0.3.0-SNAPSHOT
+
+| Component | FQCN | Notes |
+|---|---|---|
+| Subject resolver | `io.runcycles.client.java.springai.subject.SubjectResolver` | Functional interface: `Subject resolveSubject(ChatClientRequest)`. Auto-configured default backs off via `@ConditionalOnMissingBean` — users register their own bean for per-request subject routing (e.g. tenant from auth principal). The request parameter is `null` on the tool-gating path; implementations must handle `null` |
+| Default subject resolver | `io.runcycles.client.java.springai.subject.PropertiesSubjectResolver` | Default impl. Reads tenant/workspace/app/workflow/agent/toolset from `CyclesProperties` on every call (preserves v0.2.0 behavior). Ignores the request parameter |
+| Prompt token estimator | `io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator` | Functional interface: `long estimateTokens(ChatClientRequest)`. Auto-configured default backs off via `@ConditionalOnMissingBean`. Used by the lifecycle for prompt-based reservation sizing when `estimate-from-prompt=true` |
+| Default token estimator | `io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator` | Default impl. Preserves v0.2.0 `chars / 4` heuristic. Constructor variant accepts an explicit ratio for tuning (e.g. ratio=1 for CJK content) |
+| jtokkit token estimator | `io.runcycles.client.java.springai.tokenizer.JtokkitPromptTokenEstimator` | Real BPE encoding via `com.knuddels:jtokkit:1.1.0` (`optional=true` Maven dep). Supports `cl100k_base`, `o200k_base`, `p50k_base`, `p50k_edit`, `r50k_base`. Auto-configured when `cycles.spring-ai.token-estimator-encoding` is set + jtokkit on classpath |
+| Observation context keys | `io.runcycles.client.java.springai.observation.CyclesObservationContextKeys` | Internal constants — well-known keys used to thread Cycles state through `ChatClientRequest.context()` for the observation convention to read. Only `RESERVATION_ID = "cycles.reservation_id"` currently |
+
 ## Property keys (v0.1.0)
 
 | Key | Type | Default | Notes |
@@ -51,6 +62,13 @@ The Spring AI starter does not own its own protocol — it delegates to the Cycl
 | `cycles.spring-ai.tool-action-kind` | string | `tool.call` | Action.kind label reported to Cycles for `CyclesToolCallback`-wrapped tool invocations (distinct from chat's `action-kind`). |
 | `cycles.spring-ai.tool-action-name-prefix` | string | `spring-ai-tool:` | Prefix prepended to the wrapped tool's name to produce the action.name label (e.g. `spring-ai-tool:get_weather`). |
 
+## Property keys added in 0.3.0-SNAPSHOT
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `cycles.spring-ai.token-estimator-encoding` | string | _unset_ | When non-null/non-blank AND jtokkit is on the classpath, the auto-config registers `JtokkitPromptTokenEstimator` with this encoding instead of `CharsPerTokenEstimator`. Valid values (case-insensitive): `cl100k_base`, `o200k_base`, `p50k_base`, `p50k_edit`, `r50k_base`. Unknown values fail bean initialization at app startup (not silently at first call). When property set but jtokkit absent, the auto-config logs a WARN and falls back to chars/4. |
+| `cycles.spring-ai.emit-reservation-id-on-trace` | boolean | `true` | When `true`, the `CyclesChatClientObservationConvention` emits the active `cycles.reservation_id` as a high-cardinality KeyValue on chat-client observations. Default is `true` because the convention itself is already opt-in (users apply via `builder.observationConvention(...)`). Set to `false` to omit when tracing backend charges by unique tag-value combinations. |
+
 ## Auto-configuration conditions
 
 `CyclesSpringAiAutoConfiguration` activates when ALL of:
@@ -62,11 +80,13 @@ The Spring AI starter does not own its own protocol — it delegates to the Cycl
 
 When active, it registers (each with `@ConditionalOnMissingBean` semantics so users can override):
 
+- `SubjectResolver` — default impl `PropertiesSubjectResolver` reads subject defaults from `CyclesProperties` on every call. Override with a custom bean for per-request attribution. **Added in 0.3.0-SNAPSHOT.**
+- `PromptTokenEstimator` — default impl `CharsPerTokenEstimator` (chars/4 heuristic), OR `JtokkitPromptTokenEstimator` when `cycles.spring-ai.token-estimator-encoding` is set + jtokkit on the classpath. Override with a custom bean for provider-specific tokenizers. **Added in 0.3.0-SNAPSHOT.**
 - `CyclesBudgetAdvisor` — the non-streaming chat advisor.
 - `CyclesBudgetStreamAdvisor` — the streaming chat advisor.
 - A name-conditional `ChatClientCustomizer` (bean name `cyclesChatClientCustomizer`) that attaches both advisors via `builder.defaultAdvisors(callAdvisor, streamAdvisor)`. Name-keyed so it doesn't back off in the presence of unrelated `ChatClientCustomizer` beans (memory, RAG, etc.).
 - `CyclesToolGate` — the tool-wrapper factory (not auto-applied to tools).
-- `CyclesChatClientObservationConvention` — the observation convention bean (not auto-attached to builders).
+- `CyclesChatClientObservationConvention` — the observation convention bean (not auto-attached to builders). As of 0.3.0-SNAPSHOT also emits `cycles.reservation_id` as a high-cardinality KeyValue when applied (controlled by `cycles.spring-ai.emit-reservation-id-on-trace`).
 
 If any condition fails, none of the above register.
 
@@ -108,6 +128,9 @@ The entire pipeline is wrapped in `Flux.defer(...)`, so all of the steps below e
 5. On `RuntimeException` from the wrapped tool → `POST .../release` with reason = `tool-call-failed: <ExceptionClass>`, then re-throw.
 
 ## Change log
+
+### 0.3.0-SNAPSHOT (in progress)
+See [CHANGELOG.md](./CHANGELOG.md) `[Unreleased]` section for the full entry. Surface deltas vs 0.2.0 are captured in the "added in 0.3.0-SNAPSHOT" sub-tables above. New extension points (`SubjectResolver`, `PromptTokenEstimator`) and the `cycles.reservation_id` trace correlation tag; no breaking changes to v0.2.0 callers.
 
 ### 0.2.0 — 2026-05-12
 See [CHANGELOG.md](./CHANGELOG.md) for the full entry. Surface deltas vs v0.1.0 are captured in the "added in 0.2.0-SNAPSHOT" sub-tables above (the sub-table headers preserve "0.2.0-SNAPSHOT" wording so historical context — what landed in which dev cycle — stays readable; the released version is 0.2.0).
