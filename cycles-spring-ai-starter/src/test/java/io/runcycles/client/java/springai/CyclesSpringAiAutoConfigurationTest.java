@@ -113,6 +113,37 @@ class CyclesSpringAiAutoConfigurationTest {
     }
 
     @Test
+    void rejectsNegativeDefaultEstimateAtBindingTime() {
+        // A negative estimate is either rejected by Cycles as malformed or — worse —
+        // silently treated as a budget increase that subverts the authority gate.
+        // Fail fast at config-binding time so the operator sees the misconfiguration
+        // at app startup, not at first chat call.
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.default-estimate=-100")
+                .run(ctx -> {
+                    assertThat(ctx).hasFailed();
+                    assertThat(ctx.getStartupFailure())
+                            .rootCause()
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessageContaining("default-estimate must be non-negative")
+                            .hasMessageContaining("-100");
+                });
+    }
+
+    @Test
+    void acceptsZeroDefaultEstimate() {
+        // Zero is a legitimate value (e.g. a dry-run or accounting-only mode where the
+        // reservation should not actually charge). Must NOT be rejected.
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.default-estimate=0")
+                .run(ctx -> {
+                    assertThat(ctx).hasNotFailed();
+                    assertThat(ctx.getBean(CyclesSpringAiProperties.class).getDefaultEstimate())
+                            .isZero();
+                });
+    }
+
+    @Test
     void userProvidedCustomizerOverridesAutoConfigured() {
         // App supplies its own cyclesChatClientCustomizer to control attachment behavior
         // (e.g. different advisor ordering or additional advisor stacking). Name-based

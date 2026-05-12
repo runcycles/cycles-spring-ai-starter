@@ -84,11 +84,23 @@ public class CyclesSpringAiProperties {
     public long getDefaultEstimate() { return defaultEstimate; }
 
     /**
-     * Sets the default per-call estimate.
+     * Sets the default per-call estimate. Must be non-negative — a negative reservation
+     * estimate would either be rejected as malformed by the Cycles server or, worse,
+     * silently treated as a budget increase, which would subvert the authority gate.
      *
      * @param defaultEstimate non-negative estimate value.
+     * @throws IllegalArgumentException when {@code defaultEstimate < 0}. Spring's
+     *         configuration-properties binder wraps this into a
+     *         {@code ConfigurationPropertiesBindException} at app startup, so the
+     *         operator sees the misconfiguration immediately rather than at first call.
      */
-    public void setDefaultEstimate(long defaultEstimate) { this.defaultEstimate = defaultEstimate; }
+    public void setDefaultEstimate(long defaultEstimate) {
+        if (defaultEstimate < 0) {
+            throw new IllegalArgumentException(
+                    "cycles.spring-ai.default-estimate must be non-negative, got: " + defaultEstimate);
+        }
+        this.defaultEstimate = defaultEstimate;
+    }
 
     /**
      * Returns the estimate unit name.
