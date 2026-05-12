@@ -15,10 +15,13 @@ import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
+import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
 
 import java.util.Map;
 import java.util.UUID;
@@ -54,13 +57,16 @@ final class CyclesBudgetLifecycle {
     /**
      * Creates a Cycles reservation for the upcoming chat invocation.
      *
+     * @param request the originating ChatClientRequest, used for prompt-based estimation
+     *                when {@code cycles.spring-ai.estimate-from-prompt=true}. May be null
+     *                for non-chat callers (e.g. tool-callback wrappers).
      * @return the reservation id when the call should proceed, or null when fail-open
      *         is engaged and no reservation was created.
      * @throws CyclesBudgetDeniedException when the Cycles server denies the call.
      * @throws IllegalStateException on transport/HTTP failure when fail-open=false.
      */
-    String reserveOrFailOpen() {
-        ReservationCreateRequest req = buildReservationRequest();
+    String reserveOrFailOpen(ChatClientRequest request) {
+        ReservationCreateRequest req = buildReservationRequest(request);
         CyclesResponse<Map<String, Object>> response;
         try {
             response = cyclesClient.createReservation(req);
@@ -177,13 +183,55 @@ final class CyclesBudgetLifecycle {
 
     // ── Helpers shared between reservation build and actual-amount build ───────────────
 
-    private ReservationCreateRequest buildReservationRequest() {
+    private ReservationCreateRequest buildReservationRequest(ChatClientRequest request) {
         return ReservationCreateRequest.builder()
                 .idempotencyKey(UUID.randomUUID().toString())
                 .subject(buildSubject())
                 .action(new Action(springAiProperties.getActionKind(), springAiProperties.getActionName(), null))
-                .estimate(buildEstimateAmount())
+                .estimate(buildReservationEstimate(request))
                 .build();
+    }
+
+    /**
+     * Compute the reservation estimate. When {@code estimate-from-prompt=true} and the
+     * request carries non-empty prompt text and at least one cost-per-token rate is set,
+     * derives an estimate from {@code prompt-char-count / 4} approximated tokens × the
+     * sum of the input and output rates (assuming output ≈ input in token count, which
+     * is conservative-ish for most chat workloads). Falls back to {@link #buildEstimateAmount}
+     * (i.e. {@code default-estimate}) when prompt-based estimation isn't applicable.
+     */
+    private Amount buildReservationEstimate(ChatClientRequest request) {
+        if (springAiProperties.isEstimateFromPrompt() && request != null) {
+            long promptChars = extractPromptCharCount(request);
+            long inputRate = springAiProperties.getInputCostPerToken();
+            long outputRate = springAiProperties.getOutputCostPerToken();
+            if (promptChars > 0 && (inputRate > 0 || outputRate > 0)) {
+                long estimatedTokens = promptChars / 4;
+                long estimate = estimatedTokens * (inputRate + outputRate);
+                if (estimate > 0) {
+                    return new Amount(resolveUnit(), estimate);
+                }
+            }
+        }
+        return buildEstimateAmount();
+    }
+
+    private static long extractPromptCharCount(ChatClientRequest request) {
+        Prompt prompt = request.prompt();
+        if (prompt == null) {
+            return 0L;
+        }
+        long total = 0L;
+        // Spring AI guarantees a non-null list of non-null Message instances on Prompt.
+        // The text of an individual message can be null (e.g. multimodal messages where
+        // the content is a Media list rather than text), so we skip those.
+        for (Message message : prompt.getInstructions()) {
+            String text = message.getText();
+            if (text != null) {
+                total += text.length();
+            }
+        }
+        return total;
     }
 
     private Subject buildSubject() {

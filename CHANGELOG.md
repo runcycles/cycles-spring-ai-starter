@@ -23,8 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reserve / commit / release plumbing extracted to a package-private `CyclesBudgetLifecycle` helper, shared by the call and stream advisors. The two public advisor classes are thin wrappers that supply the right reactive vs imperative glue.
 - Build dependency: `spring-boot-dependencies` BOM imported alongside `spring-ai-bom` in `dependencyManagement` so `reactor-test` (used by the streaming tests) has a managed version.
 
+### Added (continued)
+- **Prompt-based reservation estimate.** New `cycles.spring-ai.estimate-from-prompt` boolean property (default false). When enabled with `input-cost-per-token` and/or `output-cost-per-token` set, the pre-call reservation is computed from the prompt char count rather than the fixed `default-estimate`. Token approximation: `prompt-chars / 4`; reservation amount: `tokens × (inputRate + outputRate)` (assuming output ≈ input). Falls back to `default-estimate` when prompt text is empty, rates are 0, or the computed estimate would be 0.
+
 ### Still pending for v0.2
-- Per-call estimate derivation from prompt token count — estimate is still a fixed constant.
 - `ToolCallback` decoration (tool-level authority gates).
 - `ObservationConvention` (richer audit-trail attribution).
 

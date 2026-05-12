@@ -65,7 +65,7 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
         // IllegalStateException (fail-closed transport/HTTP failure); both propagate up
         // without entering the try below, so no release happens for those — which is
         // correct (no reservation was created).
-        String reservationId = lifecycle.reserveOrFailOpen();
+        String reservationId = lifecycle.reserveOrFailOpen(request);
 
         // The try block ONLY wraps chain.nextCall. If that throws, we release the
         // reservation because the LLM call did not happen. If commit throws AFTER

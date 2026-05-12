@@ -90,7 +90,8 @@ class CyclesSpringAiAutoConfigurationTest {
                         "cycles.spring-ai.estimate-unit=TOKENS",
                         "cycles.spring-ai.action-kind=llm.completion",
                         "cycles.spring-ai.action-name=gpt-4o",
-                        "cycles.spring-ai.fail-open=true"
+                        "cycles.spring-ai.fail-open=true",
+                        "cycles.spring-ai.estimate-from-prompt=true"
                 )
                 .run(ctx -> {
                     CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
@@ -100,6 +101,7 @@ class CyclesSpringAiAutoConfigurationTest {
                     assertThat(props.getEstimateUnit()).isEqualTo("TOKENS");
                     assertThat(props.getActionKind()).isEqualTo("llm.completion");
                     assertThat(props.getActionName()).isEqualTo("gpt-4o");
+                    assertThat(props.isEstimateFromPrompt()).isTrue();
                 });
     }
 

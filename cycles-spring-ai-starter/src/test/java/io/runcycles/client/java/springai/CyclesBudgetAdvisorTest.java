@@ -17,11 +17,15 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisorChain;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.core.Ordered;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -420,6 +424,204 @@ class CyclesBudgetAdvisorTest {
                 .isSameAs(callFailure);
 
         verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
+    // ---- Prompt-based reservation estimate (v0.2) -----------------------
+
+    @Test
+    void reservationUsesPromptBasedEstimateWhenEnabledAndRatesSet() {
+        // estimate-from-prompt=true with rates configured: estimate is derived from
+        // promptChars / 4 × (inputRate + outputRate).
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        // A prompt with 80 chars → 20 estimated tokens → 20 * (25 + 100) = 2500.
+        String promptText = "Summarize this passage from the operator manual: chapter 3 widget care";
+        // Length is intentionally 70 chars — actual count below.
+        Prompt prompt = new Prompt(List.of(new UserMessage(promptText)));
+        when(request.prompt()).thenReturn(prompt);
+
+        long expectedEstimate = (promptText.length() / 4L) * (25L + 100L);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-prompt-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(expectedEstimate);
+    }
+
+    @Test
+    void reservationFallsBackToDefaultEstimateWhenPromptEstimationEnabledButRatesAreZero() {
+        // estimate-from-prompt=true but no rates set: can't compute a meaningful
+        // estimate from chars alone, fall back to default-estimate.
+        springAiProperties.setEstimateFromPrompt(true);
+        // rates remain 0 (default)
+
+        Prompt prompt = new Prompt(List.of(new UserMessage("some prompt text")));
+        when(request.prompt()).thenReturn(prompt);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-prompt-2"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L); // default
+    }
+
+    @Test
+    void reservationFallsBackToDefaultEstimateWhenPromptIsNull() {
+        // request.prompt() returns null (unusual but defensible — defensive null check).
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(25L);
+        when(request.prompt()).thenReturn(null);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-null-prompt"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L);
+    }
+
+    @Test
+    void reservationSkipsMessagesWithNullText() {
+        // Multimodal messages may have null .getText() (content lives in attachments).
+        // Such messages are skipped in the char count rather than NPE'ing.
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        Message nullTextMessage = mock(Message.class);
+        when(nullTextMessage.getText()).thenReturn(null);
+        Message validMessage = new UserMessage("hello world this is forty chars of text!!");
+
+        Prompt prompt = new Prompt(List.of(nullTextMessage, validMessage));
+        when(request.prompt()).thenReturn(prompt);
+
+        long expectedEstimate = (((long) "hello world this is forty chars of text!!".length()) / 4L) * (25L + 100L);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-null-text"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(expectedEstimate);
+    }
+
+    @Test
+    void reservationFallsBackToDefaultWhenComputedEstimateIsZero() {
+        // Very short prompt + small rates → estimatedTokens=0 → estimate=0.
+        // Falls back to default-estimate rather than committing a 0 reservation
+        // (which the Cycles server might also accept but is semantically wrong).
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(1L);
+        // 2-char prompt / 4 chars-per-token = 0 estimated tokens
+        Prompt prompt = new Prompt(List.of(new UserMessage("hi")));
+        when(request.prompt()).thenReturn(prompt);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-zero"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L); // fallback
+    }
+
+    @Test
+    void reservationUsesPromptEstimateWithOnlyOutputRate() {
+        // Cover the (inputRate > 0 || outputRate > 0) OR-short-circuit second branch:
+        // inputRate=0, outputRate>0.
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(0L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        String promptText = "Estimate from prompt size with only output rate configured.";
+        Prompt prompt = new Prompt(List.of(new UserMessage(promptText)));
+        when(request.prompt()).thenReturn(prompt);
+
+        long expectedEstimate = (((long) promptText.length()) / 4L) * (0L + 100L);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-out-only"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(expectedEstimate);
+    }
+
+    @Test
+    void reservationFallsBackToDefaultEstimateWhenPromptIsEmpty() {
+        // estimate-from-prompt=true, rates set, but prompt has no text content.
+        springAiProperties.setEstimateFromPrompt(true);
+        springAiProperties.setInputCostPerToken(25L);
+
+        Prompt prompt = new Prompt(List.of()); // no messages
+        when(request.prompt()).thenReturn(prompt);
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-prompt-3"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L); // default
+    }
+
+    @Test
+    void reservationUsesDefaultEstimateWhenPromptEstimationDisabled() {
+        // Default behavior: estimate-from-prompt=false → lifecycle does not look at the
+        // prompt at all, uses default-estimate. (No request.prompt() stub needed —
+        // the code path never accesses it.)
+        springAiProperties.setInputCostPerToken(25L);  // rates are set but prompt mode is off
+        // estimateFromPrompt remains false (default)
+
+        ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(reserveCaptor.capture()))
+                .thenReturn(reservationAllow("res-prompt-4"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(reserveCaptor.getValue().getEstimate().getAmount()).isEqualTo(1000L); // default
     }
 
     // ---- Real Usage extraction on commit (v0.2) -------------------------

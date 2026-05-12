@@ -88,6 +88,23 @@ public class CyclesSpringAiProperties {
      */
     private long outputCostPerToken = 0L;
 
+    /**
+     * When true, derive the pre-call reservation amount from the prompt text size
+     * instead of using {@link #defaultEstimate}. Requires {@link #inputCostPerToken}
+     * and/or {@link #outputCostPerToken} to be set; without rates, falls back to
+     * the default estimate.
+     *
+     * <p>Token approximation: {@code prompt-char-count / 4} (rough chars-per-token
+     * ratio for English). Reservation amount: {@code estimatedInputTokens × (inputRate + outputRate)},
+     * assuming output token count is comparable to input. This is intentionally
+     * conservative-leaning so the reservation rarely under-shoots the actual commit.
+     *
+     * <p>For tighter or more provider-accurate estimates, override
+     * {@link io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor} via a
+     * user bean.
+     */
+    private boolean estimateFromPrompt = false;
+
     /** Default constructor for Spring property binding. */
     public CyclesSpringAiProperties() {
         // Spring instantiates this via reflection; defaults are set on field declarations.
@@ -229,5 +246,21 @@ public class CyclesSpringAiProperties {
                     "cycles.spring-ai.output-cost-per-token must be non-negative, got: " + outputCostPerToken);
         }
         this.outputCostPerToken = outputCostPerToken;
+    }
+
+    /**
+     * Returns whether reservation estimate is derived from the prompt size.
+     *
+     * @return true to derive from prompt char count, false to use default-estimate.
+     */
+    public boolean isEstimateFromPrompt() { return estimateFromPrompt; }
+
+    /**
+     * Sets whether reservation estimate is derived from the prompt size.
+     *
+     * @param estimateFromPrompt true to opt into prompt-based estimation.
+     */
+    public void setEstimateFromPrompt(boolean estimateFromPrompt) {
+        this.estimateFromPrompt = estimateFromPrompt;
     }
 }

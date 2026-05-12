@@ -75,7 +75,7 @@ public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
         // Reserve before subscribing to the upstream. May throw CyclesBudgetDeniedException
         // or IllegalStateException (fail-closed); both propagate to the caller without
         // engaging the stream lifecycle.
-        String reservationId = lifecycle.reserveOrFailOpen();
+        String reservationId = lifecycle.reserveOrFailOpen(request);
 
         // Track the most-recently-seen element so we have a chance to extract usage
         // from the final chunk. AtomicReference because Reactor signals can fire on
