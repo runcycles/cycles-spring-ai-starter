@@ -89,6 +89,18 @@
             <version>0.2.2</version>
         </dependency>
 
+        <!-- Spring Boot configuration metadata generator — gives IDE autocomplete
+             on cycles.spring-ai.* properties in application.yml / application.properties.
+             optional=true so consumers don't pull it transitively. The processor runs
+             at compile time and emits META-INF/spring-configuration-metadata.json
+             into the produced jar. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <version>${spring.boot.version}</version>
+            <optional>true</optional>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

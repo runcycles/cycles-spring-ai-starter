@@ -10,7 +10,7 @@ This file tracks known coverage shortfalls against the project's **95%-or-higher
 Covered:
 - `CyclesSpringAiProperties` — all getters/setters across 6 properties.
 - `CyclesSpringAiAutoConfiguration` — wiring matrix (enabled / disabled / no-CyclesClient / property-defaults / all-properties-set).
-- `CyclesBudgetAdvisor` — full reserve → call → commit happy path; deny → throw without call; reserve transport-failure × fail-open/fail-closed; reserve HTTP-failure × fail-open/fail-closed; unparseable reservation response; commit transport-failure × fail-open/fail-closed; commit HTTP-failure fail-closed; chain exception → release; release failure doesn't mask original; fail-open + chain exception skip release; unrecognized estimate unit fallback. 17 distinct test methods covering 13 distinct branches.
+- `CyclesBudgetAdvisor` — full reserve → call → commit happy path; deny → throw without call; reserve transport / HTTP failures across fail-open and fail-closed; malformed 2xx reservation responses (unknown decision, missing reservation_id) treated as HTTP failures; commit transport / HTTP failures across fail-open and fail-closed; **commit-failure-does-not-release-reservation** (post-call commit threw → reservation NOT released because LLM call succeeded and budget was consumed); chain exception → release; release HTTP failure logged but does not mask original; fail-open reserve skip → no release on chain exception; unrecognized estimate unit fallback.
 - `CyclesBudgetDeniedException` — reasonCode / scopePath accessors covered transitively via deny path.
 
 ## Open gaps

@@ -43,7 +43,22 @@ jobs:
             echo "::error::Cannot publish SNAPSHOT version: $VERSION. Drop -SNAPSHOT in the pom before tagging."
             exit 1
           fi
-          echo "Publishing version: $VERSION"
+          echo "pom version: $VERSION"
+
+      - name: Verify pom version matches release tag
+        if: github.event_name == 'release'
+        working-directory: cycles-spring-ai-starter
+        # Catches the case where someone tags v0.1.1 while the pom still says 0.1.0.
+        # Sonatype would publish the artifact at the pom version, not the tag,
+        # producing a release artifact that doesn't match the git tag.
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          TAG="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" != "$TAG" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match pom version ${VERSION}. Bump the pom version to match the tag before re-cutting the release."
+            exit 1
+          fi
+          echo "Tag ${GITHUB_REF_NAME} matches pom version ${VERSION}"
 
       - name: Test release build without publishing
         working-directory: cycles-spring-ai-starter
@@ -83,7 +98,20 @@ jobs:
             echo "::error::Cannot publish SNAPSHOT version: $VERSION. Drop -SNAPSHOT in the pom before tagging."
             exit 1
           fi
-          echo "Publishing version: $VERSION"
+          echo "pom version: $VERSION"
+
+      - name: Verify pom version matches release tag
+        working-directory: cycles-spring-ai-starter
+        # Belt + suspenders: also verify in the publish job in case the upstream
+        # test-release-build check is ever bypassed.
+        run: |
+          VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          TAG="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" != "$TAG" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match pom version ${VERSION}."
+            exit 1
+          fi
+          echo "Publishing version: $VERSION (matches tag ${GITHUB_REF_NAME})"
 
       - name: Publish
         working-directory: cycles-spring-ai-starter
