@@ -125,6 +125,23 @@ public class CyclesSpringAiProperties {
     private boolean estimateFromPrompt = false;
 
     /**
+     * When true, the {@code CyclesChatClientObservationConvention} emits the active
+     * Cycles {@code reservation_id} as a high-cardinality KeyValue on each chat-client
+     * observation, enabling trace ↔ reservation correlation in your tracing backend.
+     * Default is true — the convention itself is already opt-in (users explicitly
+     * apply it via {@code chatClientBuilder.observationConvention(...)}), so anyone
+     * who has opted in to the convention almost certainly wants the correlation tag.
+     * Set to false to omit the reservation_id (e.g. if your tracing backend charges
+     * by unique tag-value combinations and per-call IDs blow your budget).
+     *
+     * <p>The advisors store the reservation_id in the request context after a
+     * successful reserve; the convention reads it back at observation-stop time.
+     * For tool-gated invocations (CyclesToolCallback), the tool isn't a chat-client
+     * observation, so this property has no effect there.
+     */
+    private boolean emitReservationIdOnTrace = true;
+
+    /**
      * jtokkit encoding name to use for prompt token estimation. When non-null AND
      * jtokkit is on the classpath, the auto-configuration registers a
      * {@code JtokkitPromptTokenEstimator} as the {@code PromptTokenEstimator} bean
@@ -337,6 +354,23 @@ public class CyclesSpringAiProperties {
      */
     public void setEstimateFromPrompt(boolean estimateFromPrompt) {
         this.estimateFromPrompt = estimateFromPrompt;
+    }
+
+    /**
+     * Returns whether the observation convention emits reservation_id as a
+     * high-cardinality KeyValue.
+     *
+     * @return true to emit the reservation_id tag on chat-client traces.
+     */
+    public boolean isEmitReservationIdOnTrace() { return emitReservationIdOnTrace; }
+
+    /**
+     * Sets whether the observation convention emits reservation_id.
+     *
+     * @param emitReservationIdOnTrace true to emit, false to omit.
+     */
+    public void setEmitReservationIdOnTrace(boolean emitReservationIdOnTrace) {
+        this.emitReservationIdOnTrace = emitReservationIdOnTrace;
     }
 
     /**

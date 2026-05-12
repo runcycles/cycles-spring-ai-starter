@@ -4,6 +4,7 @@ import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.observation.CyclesObservationContextKeys;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
 import io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator;
 import org.springframework.ai.chat.client.ChatClientRequest;
@@ -124,6 +125,17 @@ public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
         //     pipeline). Subscribers can branch with .onErrorResume(...) and friends.
         return Flux.defer(() -> {
             String reservationId = lifecycle.reserveOrFailOpen(request);
+
+            // Thread the reservation_id into the request context for trace correlation
+            // (see CyclesObservationContextKeys / CyclesChatClientObservationConvention).
+            // For streaming observations, the underlying observation lifecycle is more
+            // intricate than the non-streaming case — Spring AI's behavior for
+            // streaming observations may close them before reactive subscribers fully
+            // complete — but storing the id here is the right shape for any
+            // convention that picks it up.
+            if (reservationId != null && request != null) {
+                request.context().put(CyclesObservationContextKeys.RESERVATION_ID, reservationId);
+            }
 
             // Track the most-recently-seen element so we have a chance to extract usage
             // from the final chunk. AtomicReference because Reactor signals can fire on

@@ -4,6 +4,7 @@ import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.observation.CyclesObservationContextKeys;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
 import io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator;
 import org.springframework.ai.chat.client.ChatClientRequest;
@@ -110,6 +111,16 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
         // without entering the try below, so no release happens for those — which is
         // correct (no reservation was created).
         String reservationId = lifecycle.reserveOrFailOpen(request);
+
+        // Thread the reservation_id into the request context so the
+        // CyclesChatClientObservationConvention can emit it as a high-cardinality
+        // KeyValue on the trace (enabling trace ↔ reservation correlation). The
+        // observation reads context at stop time, which is AFTER this advisor returns,
+        // so the put is observable. Skipped when reservationId is null (fail-open
+        // reserve skip — no reservation to correlate).
+        if (reservationId != null && request != null) {
+            request.context().put(CyclesObservationContextKeys.RESERVATION_ID, reservationId);
+        }
 
         // The try block ONLY wraps chain.nextCall. If that throws, we release the
         // reservation because the LLM call did not happen. If commit throws AFTER

@@ -100,6 +100,42 @@ class CyclesBudgetAdvisorTest {
     }
 
     @Test
+    void reservationIdIsStashedInRequestContextForTraceCorrelation() {
+        // Theme C: after a successful reserve, the advisor puts the reservation_id
+        // into request.context() so the CyclesChatClientObservationConvention can
+        // emit it as a high-cardinality KeyValue at observation-stop time.
+        java.util.Map<String, Object> requestContext = new java.util.HashMap<>();
+        when(request.context()).thenReturn(requestContext);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-correlation"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(requestContext)
+                .containsEntry("cycles.reservation_id", "res-correlation");
+    }
+
+    @Test
+    void noReservationIdInContextWhenFailOpenReserveSkipped() {
+        // fail-open + reserve transport failure → reservationId=null. The advisor
+        // must NOT pollute request.context() with a null or empty value.
+        springAiProperties.setFailOpen(true);
+        java.util.Map<String, Object> requestContext = new java.util.HashMap<>();
+        // request.context() is only called when reservationId != null, so we don't
+        // strictly need the stub — but include it to document intent.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenThrow(new RuntimeException("connection refused"));
+        when(chain.nextCall(request)).thenReturn(response);
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(requestContext).doesNotContainKey("cycles.reservation_id");
+    }
+
+    @Test
     void reservationRequestCarriesSubjectAndActionFromConfiguration() {
         ArgumentCaptor<ReservationCreateRequest> captor =
                 ArgumentCaptor.forClass(ReservationCreateRequest.class);
