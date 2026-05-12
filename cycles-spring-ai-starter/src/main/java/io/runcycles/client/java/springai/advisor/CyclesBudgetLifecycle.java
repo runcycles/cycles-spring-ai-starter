@@ -280,10 +280,11 @@ public final class CyclesBudgetLifecycle {
             if (inputRate > 0 || outputRate > 0) {
                 long estimatedTokens = tokenEstimator.estimateTokens(request);
                 if (estimatedTokens > 0) {
+                    // estimate is guaranteed > 0 here: tokens > 0 AND at least one rate
+                    // > 0 (guarded above), so tokens × (inputRate + outputRate) > 0.
+                    // No additional zero-guard needed.
                     long estimate = estimatedTokens * (inputRate + outputRate);
-                    if (estimate > 0) {
-                        return new Amount(resolveUnit(), estimate);
-                    }
+                    return new Amount(resolveUnit(), estimate);
                 }
             }
         }

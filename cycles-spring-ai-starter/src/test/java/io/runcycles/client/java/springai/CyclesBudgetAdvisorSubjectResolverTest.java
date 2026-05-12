@@ -167,6 +167,29 @@ class CyclesBudgetAdvisorSubjectResolverTest {
         assertThat(sent.getWorkspace()).isEqualTo("eq-ws");
     }
 
+    @Test
+    void threeArgBackwardCompatConstructorWiresDefaultResolverAndEstimator() {
+        // The legacy 3-arg constructor (no SubjectResolver, no PromptTokenEstimator) is
+        // preserved so direct-instantiation callers from v0.2.0 don't break. It internally
+        // wires the property-derived defaults — equivalent to v0.2.0 behavior.
+        CyclesProperties cyclesProperties = new CyclesProperties();
+        cyclesProperties.setTenant("legacy-3arg");
+        CyclesSpringAiProperties springAiProperties = new CyclesSpringAiProperties();
+
+        CyclesBudgetAdvisor advisor = new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties);
+
+        ArgumentCaptor<ReservationCreateRequest> captor =
+                ArgumentCaptor.forClass(ReservationCreateRequest.class);
+        when(cyclesClient.createReservation(captor.capture())).thenReturn(reservationAllow("res"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(captor.getValue().getSubject().getTenant()).isEqualTo("legacy-3arg");
+    }
+
     private static CyclesResponse<Map<String, Object>> reservationAllow(String id) {
         return CyclesResponse.success(200, Map.of(
                 "decision", "ALLOW",
