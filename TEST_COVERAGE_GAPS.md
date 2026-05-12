@@ -4,22 +4,33 @@ This file tracks known coverage shortfalls against the project's **95%-or-higher
 
 ## Current state
 
-The scaffold contains skeleton classes only. Tests will land alongside the first real implementation; until then, jacoco's `check` rule (95% BUNDLE INSTRUCTION coverage) is configured in the pom.xml but unenforced because there is no business logic to cover.
+- Library bundle (`cycles-spring-ai-starter`): **100% instruction coverage** (jacoco `check` passes; rule is BUNDLE INSTRUCTION ≥ 95%).
+- Demo module (`cycles-spring-ai-demo`): not subject to the rule (not published).
+
+The scaffold ships covered, including:
+- `CyclesSpringAiProperties` — all getters/setters, all four properties.
+- `CyclesSpringAiAutoConfiguration` — wiring contract (enabled / disabled / defaults / all-properties-set).
+- `CyclesBudgetAdvisor` — `getName()`, `getOrder()`, `adviseCall()` pass-through.
 
 ## Open gaps
 
-### Skeleton — applies to all initial classes
-- `CyclesBudgetAdvisor`: no logic yet — empty `aroundCall` pass-through. Will need:
-  - Pre-call: assertion that budget-id is read from properties and forwarded to the Cycles client.
-  - Post-call: assertion that `Usage` from `ChatResponse` is recorded back to Cycles.
-  - Error path: assertion that fail-open behavior gates correctly.
-- `CyclesSpringAiAutoConfiguration`:
-  - Assertion: bean wires only when Spring AI is on the classpath.
-  - Assertion: bean does not wire when `cycles.spring-ai.enabled=false`.
-  - Assertion: bean does not wire when `cycles.spring-ai.budget-id` is missing (and `enabled=true`) — should log a clear error rather than NPE later.
+None at scaffold stage.
 
-## Test strategy (planned for v0.1.0)
+## Test gaps that will open with v0.1.0
 
-1. Unit tests with `MockChatModel` (Spring AI provides this in `spring-ai-test`) for the advisor's pre/post hooks.
-2. Slice tests with `@SpringBootTest(classes = CyclesSpringAiAutoConfiguration.class)` for the auto-configuration matrix (enabled/disabled × on-classpath/off-classpath × property-validity).
-3. Integration test against ollama in Testcontainers for end-to-end advisor behavior with a real chat model (gated to nightly CI to keep PR CI fast).
+When `CyclesBudgetAdvisor` gains real budget-gating logic, the following branches will need coverage to keep the 95% bar:
+
+- Pre-call: assertion that budget-id is read from properties and forwarded to the Cycles client.
+- Pre-call: assertion that the call is denied when the Cycles server reports over-budget.
+- Post-call: assertion that `Usage` from `ChatResponse` is recorded back to Cycles.
+- Error path: `failOpen=true` logs and proceeds; `failOpen=false` re-throws.
+
+When `CyclesToolCallbackDecorator` lands (v0.2):
+- Assertion that wrapped tool's metadata (name, description, JSON schema) is preserved.
+- Assertion that pre-tool authority check denies before the wrapped tool executes.
+
+## Test strategy
+
+1. Unit tests with `MockChatModel` (Spring AI provides this in its test support) for the advisor's pre/post hooks.
+2. Slice tests with `ApplicationContextRunner` for the auto-configuration matrix (enabled/disabled × on-classpath/off-classpath × property-validity). The current four tests already do this.
+3. Integration test against ollama in Testcontainers for end-to-end advisor behavior with a real chat model (gated to nightly CI to keep PR CI fast). Lands with v0.1.0.

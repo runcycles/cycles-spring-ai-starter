@@ -27,6 +27,11 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
 
     private final CyclesSpringAiProperties properties;
 
+    /**
+     * Constructs a budget advisor bound to the given configuration.
+     *
+     * @param properties the bound Cycles configuration properties.
+     */
     public CyclesBudgetAdvisor(CyclesSpringAiProperties properties) {
         this.properties = properties;
     }

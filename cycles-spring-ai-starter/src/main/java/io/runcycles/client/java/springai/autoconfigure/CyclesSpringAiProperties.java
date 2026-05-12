@@ -33,15 +33,64 @@ public class CyclesSpringAiProperties {
      */
     private boolean failOpen = false;
 
+    /** Default constructor for Spring property binding. */
+    public CyclesSpringAiProperties() {
+        // Spring instantiates this via reflection; defaults are set on field declarations.
+    }
+
+    /**
+     * Returns whether the Cycles Spring AI integration is enabled.
+     *
+     * @return true when enabled.
+     */
     public boolean isEnabled() { return enabled; }
+
+    /**
+     * Sets the master enable switch.
+     *
+     * @param enabled set false to bypass Cycles entirely.
+     */
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
+    /**
+     * Returns the Cycles budget identifier, or null when unset.
+     *
+     * @return the budget id.
+     */
     public String getBudgetId() { return budgetId; }
+
+    /**
+     * Sets the Cycles budget identifier to charge calls against.
+     *
+     * @param budgetId the budget id.
+     */
     public void setBudgetId(String budgetId) { this.budgetId = budgetId; }
 
+    /**
+     * Returns the Cycles server URL.
+     *
+     * @return the server URL.
+     */
     public String getServerUrl() { return serverUrl; }
+
+    /**
+     * Sets the Cycles server URL this application talks to.
+     *
+     * @param serverUrl the server URL.
+     */
     public void setServerUrl(String serverUrl) { this.serverUrl = serverUrl; }
 
+    /**
+     * Returns whether advisor errors are tolerated (log + proceed) or surfaced.
+     *
+     * @return true to fail open.
+     */
     public boolean isFailOpen() { return failOpen; }
+
+    /**
+     * Sets the fail-open behavior on Cycles errors.
+     *
+     * @param failOpen true to log and proceed, false to surface the error.
+     */
     public void setFailOpen(boolean failOpen) { this.failOpen = failOpen; }
 }

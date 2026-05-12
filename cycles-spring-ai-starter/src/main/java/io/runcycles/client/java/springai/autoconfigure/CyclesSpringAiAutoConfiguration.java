@@ -21,6 +21,20 @@ import org.springframework.context.annotation.Bean;
 @EnableConfigurationProperties(CyclesSpringAiProperties.class)
 public class CyclesSpringAiAutoConfiguration {
 
+    /** Default constructor used by Spring to instantiate the auto-configuration. */
+    public CyclesSpringAiAutoConfiguration() {
+        // Annotation-driven; nothing to initialize.
+    }
+
+    /**
+     * Registers the Cycles budget advisor as a Spring AI {@link CallAdvisor}.
+     *
+     * <p>Spring AI's auto-configured {@code ChatClient.Builder} picks up all {@link CallAdvisor}
+     * beans from the context and registers them on every produced ChatClient.
+     *
+     * @param properties the bound Cycles properties.
+     * @return the budget-gating call advisor.
+     */
     @Bean
     public CallAdvisor cyclesBudgetAdvisor(CyclesSpringAiProperties properties) {
         return new CyclesBudgetAdvisor(properties);

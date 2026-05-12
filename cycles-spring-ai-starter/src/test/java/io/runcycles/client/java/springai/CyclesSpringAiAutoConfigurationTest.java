@@ -12,8 +12,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Smoke tests for the Cycles Spring AI auto-configuration.
  *
- * <p>These assert the property-binding and conditional-wiring contract. Behavioral coverage
- * for {@link CyclesBudgetAdvisor} lands with v0.1.0 once the advisor has real logic.
+ * <p>Asserts the property-binding and conditional-wiring contract. Behavioral coverage
+ * for {@link CyclesBudgetAdvisor} is in {@link CyclesBudgetAdvisorTest}.
  */
 class CyclesSpringAiAutoConfigurationTest {
 
@@ -21,7 +21,7 @@ class CyclesSpringAiAutoConfigurationTest {
         .withConfiguration(AutoConfigurations.of(CyclesSpringAiAutoConfiguration.class));
 
     @Test
-    void wiresWhenEnabledByDefault() {
+    void wiresAdvisorWhenEnabledByDefault() {
         contextRunner
             .withPropertyValues("cycles.spring-ai.budget-id=test-budget")
             .run(ctx -> {
@@ -36,7 +36,9 @@ class CyclesSpringAiAutoConfigurationTest {
     void doesNotWireWhenExplicitlyDisabled() {
         contextRunner
             .withPropertyValues("cycles.spring-ai.enabled=false")
-            .run(ctx -> assertThat(ctx).doesNotHaveBean(CyclesBudgetAdvisor.class));
+            .run(ctx -> {
+                assertThat(ctx).doesNotHaveBean(CyclesBudgetAdvisor.class);
+            });
     }
 
     @Test
@@ -44,8 +46,28 @@ class CyclesSpringAiAutoConfigurationTest {
         contextRunner
             .run(ctx -> {
                 CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
+                assertThat(props.isEnabled()).isTrue();
                 assertThat(props.getServerUrl()).isEqualTo("http://localhost:8080");
                 assertThat(props.isFailOpen()).isFalse();
+                assertThat(props.getBudgetId()).isNull();
+            });
+    }
+
+    @Test
+    void bindsAllPropertiesWhenSet() {
+        contextRunner
+            .withPropertyValues(
+                "cycles.spring-ai.enabled=true",
+                "cycles.spring-ai.budget-id=tenant-prod",
+                "cycles.spring-ai.server-url=https://cycles.example.com",
+                "cycles.spring-ai.fail-open=true"
+            )
+            .run(ctx -> {
+                CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
+                assertThat(props.isEnabled()).isTrue();
+                assertThat(props.getBudgetId()).isEqualTo("tenant-prod");
+                assertThat(props.getServerUrl()).isEqualTo("https://cycles.example.com");
+                assertThat(props.isFailOpen()).isTrue();
             });
     }
 }
