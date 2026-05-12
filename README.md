@@ -287,10 +287,12 @@ The project uses Maven [CI-friendly versions](https://maven.apache.org/maven-ci-
 
 To cut a release:
 
-1. Edit `.mvn/maven.config`: `-Drevision=0.2.0-SNAPSHOT` → `-Drevision=0.2.0`.
-2. Commit, tag `v0.2.0`, push the tag.
-3. The release workflow checks `mvn help:evaluate -Dexpression=project.version` against the tag — both now read `0.2.0` from `.mvn/maven.config`, so the gate passes.
+1. Edit `.mvn/maven.config`: `-Drevision=0.2.0-SNAPSHOT` → `-Drevision=0.2.0`. Commit and push to `main`.
+2. Create a **GitHub Release** for the new version (e.g. via `gh release create v0.2.0 --generate-notes` or the GitHub UI). Creating the release also creates the tag if it doesn't exist. The publish workflow triggers on `release: [created]` — **pushing a bare tag does not trigger publishing**, only the release event does.
+3. The publish workflow checks `mvn help:evaluate -Dexpression=project.version` against the tag — both now read `0.2.0` from `.mvn/maven.config`, so the version-vs-tag gate passes and the artifact deploys to Maven Central.
 4. After the release ships, edit `.mvn/maven.config` again: `-Drevision=0.2.0` → `-Drevision=0.3.0-SNAPSHOT`. Commit, push.
+
+To test a release build without publishing (e.g. to verify GPG signing works on a new key): trigger the publish workflow via `workflow_dispatch` from the Actions tab. That runs the `test-release-build` job only — no deploy.
 
 The `flatten-maven-plugin` (configured on both poms in `resolveCiFriendliesOnly` mode) substitutes `${revision}` with the resolved value at `process-resources` and produces a `.flattened-pom.xml` that gets installed/deployed. Sonatype Central requires a literal version in the published pom; non-CI-friendly properties (BOM versions, etc.) remain as `${...}` in the published pom and are interpolated against the same pom's `<properties>` block at consumer-resolve time — the standard behavior.
 
