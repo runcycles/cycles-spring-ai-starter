@@ -8,7 +8,13 @@ import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
 import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
+import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
+import io.runcycles.client.java.springai.tokenizer.JtokkitPromptTokenEstimator;
+import io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator;
 import io.runcycles.client.java.springai.tool.CyclesToolGate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.util.ClassUtils;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -52,6 +58,10 @@ import org.springframework.context.annotation.Bean;
 @EnableConfigurationProperties(CyclesSpringAiProperties.class)
 public class CyclesSpringAiAutoConfiguration {
 
+    private static final Logger log = LoggerFactory.getLogger(CyclesSpringAiAutoConfiguration.class);
+
+    private static final String JTOKKIT_ENCODINGS_CLASS = "com.knuddels.jtokkit.Encodings";
+
     /** Default constructor used by Spring to instantiate the auto-configuration. */
     public CyclesSpringAiAutoConfiguration() {
         // Annotation-driven; nothing to initialize.
@@ -88,13 +98,54 @@ public class CyclesSpringAiAutoConfiguration {
         return new PropertiesSubjectResolver(cyclesProperties);
     }
 
+    /**
+     * Default {@link PromptTokenEstimator} bean.
+     *
+     * <p>Resolution order:
+     * <ol>
+     *   <li>If {@code cycles.spring-ai.token-estimator-encoding} is set AND jtokkit
+     *       is on the classpath, register a {@link JtokkitPromptTokenEstimator} with
+     *       the configured encoding — real BPE tokenization, significantly more
+     *       accurate than the chars/4 heuristic.</li>
+     *   <li>If the property is set BUT jtokkit isn't on the classpath: log a WARN
+     *       at startup and fall back to {@link CharsPerTokenEstimator} (the chars/4
+     *       heuristic). Users see this immediately at boot rather than getting
+     *       silently-wrong estimates at first call.</li>
+     *   <li>Otherwise: register {@link CharsPerTokenEstimator} (v0.2.0 default).</li>
+     * </ol>
+     *
+     * <p>{@link ConditionalOnMissingBean} backs this off when a user-provided
+     * {@code PromptTokenEstimator} bean is registered.
+     *
+     * @param springAiProperties Spring AI integration configuration.
+     * @return the resolved estimator.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public PromptTokenEstimator cyclesPromptTokenEstimator(CyclesSpringAiProperties springAiProperties) {
+        String encoding = springAiProperties.getTokenEstimatorEncoding();
+        if (encoding == null || encoding.isBlank()) {
+            return new CharsPerTokenEstimator();
+        }
+        if (!ClassUtils.isPresent(JTOKKIT_ENCODINGS_CLASS, getClass().getClassLoader())) {
+            log.warn("cycles.spring-ai.token-estimator-encoding is set to '{}' but jtokkit "
+                    + "is not on the classpath. Add com.knuddels:jtokkit:1.1.0 (or supply "
+                    + "your own PromptTokenEstimator bean) to enable real BPE tokenization. "
+                    + "Falling back to the chars/4 heuristic for now.", encoding);
+            return new CharsPerTokenEstimator();
+        }
+        return new JtokkitPromptTokenEstimator(encoding);
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public CyclesBudgetAdvisor cyclesBudgetAdvisor(CyclesClient cyclesClient,
                                                    CyclesProperties cyclesProperties,
                                                    CyclesSpringAiProperties springAiProperties,
-                                                   SubjectResolver subjectResolver) {
-        return new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties, subjectResolver);
+                                                   SubjectResolver subjectResolver,
+                                                   PromptTokenEstimator tokenEstimator) {
+        return new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties,
+                subjectResolver, tokenEstimator);
     }
 
     /**
@@ -107,6 +158,8 @@ public class CyclesSpringAiAutoConfiguration {
      * @param cyclesClient        the Cycles HTTP client.
      * @param cyclesProperties    SDK-level configuration.
      * @param springAiProperties  Spring AI integration configuration.
+     * @param subjectResolver     resolves the Cycles subject per reservation.
+     * @param tokenEstimator      estimates prompt tokens for prompt-based reservation sizing.
      * @return the streaming budget-gating advisor.
      */
     @Bean
@@ -114,8 +167,10 @@ public class CyclesSpringAiAutoConfiguration {
     public CyclesBudgetStreamAdvisor cyclesBudgetStreamAdvisor(CyclesClient cyclesClient,
                                                                CyclesProperties cyclesProperties,
                                                                CyclesSpringAiProperties springAiProperties,
-                                                               SubjectResolver subjectResolver) {
-        return new CyclesBudgetStreamAdvisor(cyclesClient, cyclesProperties, springAiProperties, subjectResolver);
+                                                               SubjectResolver subjectResolver,
+                                                               PromptTokenEstimator tokenEstimator) {
+        return new CyclesBudgetStreamAdvisor(cyclesClient, cyclesProperties, springAiProperties,
+                subjectResolver, tokenEstimator);
     }
 
     /**

@@ -106,21 +106,49 @@ public class CyclesSpringAiProperties {
     private long outputCostPerToken = 0L;
 
     /**
-     * When true, derive the pre-call reservation amount from the prompt text size
-     * instead of using {@link #defaultEstimate}. Requires {@link #inputCostPerToken}
-     * and/or {@link #outputCostPerToken} to be set; without rates, falls back to
-     * the default estimate.
+     * When true, derive the pre-call reservation amount from the prompt size instead
+     * of using {@link #defaultEstimate}. Requires {@link #inputCostPerToken} and/or
+     * {@link #outputCostPerToken} to be set; without rates, falls back to the default
+     * estimate.
      *
-     * <p>Token approximation: {@code prompt-char-count / 4} (rough chars-per-token
-     * ratio for English). Reservation amount: {@code estimatedInputTokens × (inputRate + outputRate)},
+     * <p>The actual prompt-to-tokens mapping is delegated to the configured
+     * {@code PromptTokenEstimator} bean. The auto-configured default is a chars/4
+     * heuristic ({@code CharsPerTokenEstimator}) that approximates OpenAI BPE on
+     * English text. For tighter estimates, either set
+     * {@link #tokenEstimatorEncoding} to opt in to jtokkit's real BPE encoding, or
+     * supply your own {@code PromptTokenEstimator} bean.
+     *
+     * <p>Reservation amount: {@code estimatedInputTokens × (inputRate + outputRate)},
      * assuming output token count is comparable to input. This is intentionally
      * conservative-leaning so the reservation rarely under-shoots the actual commit.
-     *
-     * <p>For tighter or more provider-accurate estimates, override
-     * {@link io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor} via a
-     * user bean.
      */
     private boolean estimateFromPrompt = false;
+
+    /**
+     * jtokkit encoding name to use for prompt token estimation. When non-null AND
+     * jtokkit is on the classpath, the auto-configuration registers a
+     * {@code JtokkitPromptTokenEstimator} as the {@code PromptTokenEstimator} bean
+     * (overriding the chars/4 default). When null (the default), the chars/4 estimator
+     * stays in place.
+     *
+     * <p>Valid values (case-insensitive): {@code cl100k_base} (gpt-3.5-turbo, gpt-4),
+     * {@code o200k_base} (gpt-4o family), {@code p50k_base} / {@code p50k_edit} /
+     * {@code r50k_base} (older models). The starter's own {@code @ConditionalOnClass}
+     * gating means setting this without the jtokkit dep on the classpath is a no-op:
+     * the chars/4 estimator stays, and a startup-time WARN log surfaces the misconfig.
+     *
+     * <p>Example:
+     *
+     * <pre>{@code
+     * cycles:
+     *   spring-ai:
+     *     estimate-from-prompt: true
+     *     input-cost-per-token: 25
+     *     output-cost-per-token: 100
+     *     token-estimator-encoding: o200k_base
+     * }</pre>
+     */
+    private String tokenEstimatorEncoding = null;
 
     /** Default constructor for Spring property binding. */
     public CyclesSpringAiProperties() {
@@ -309,5 +337,22 @@ public class CyclesSpringAiProperties {
      */
     public void setEstimateFromPrompt(boolean estimateFromPrompt) {
         this.estimateFromPrompt = estimateFromPrompt;
+    }
+
+    /**
+     * Returns the jtokkit encoding name (or null if unset).
+     *
+     * @return the encoding name, or null.
+     */
+    public String getTokenEstimatorEncoding() { return tokenEstimatorEncoding; }
+
+    /**
+     * Sets the jtokkit encoding name to use for prompt-token estimation.
+     *
+     * @param tokenEstimatorEncoding the encoding name (e.g. "cl100k_base") or null
+     *                               to use the chars/4 default.
+     */
+    public void setTokenEstimatorEncoding(String tokenEstimatorEncoding) {
+        this.tokenEstimatorEncoding = tokenEstimatorEncoding;
     }
 }

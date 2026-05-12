@@ -119,6 +119,18 @@
             <optional>true</optional>
         </dependency>
 
+        <!-- jtokkit: pure-Java OpenAI BPE tokenizer. optional=true so consumers don't
+             pull it transitively — only users who opt in to JtokkitPromptTokenEstimator
+             (via cycles.spring-ai.token-estimator-encoding=cl100k_base / o200k_base)
+             need it on their classpath. ConditionalOnClass guards the auto-config so the
+             starter still works when jtokkit isn't present. -->
+        <dependency>
+            <groupId>com.knuddels</groupId>
+            <artifactId>jtokkit</artifactId>
+            <version>1.1.0</version>
+            <optional>true</optional>
+        </dependency>
+
         <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

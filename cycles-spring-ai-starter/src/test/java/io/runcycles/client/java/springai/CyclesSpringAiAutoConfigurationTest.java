@@ -9,6 +9,9 @@ import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
 import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
+import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
+import io.runcycles.client.java.springai.tokenizer.JtokkitPromptTokenEstimator;
+import io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.ai.chat.client.ChatClient;
@@ -49,6 +52,71 @@ class CyclesSpringAiAutoConfigurationTest {
             CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
             assertThat(props.isEnabled()).isTrue();
         });
+    }
+
+    @Test
+    void wiresDefaultPromptTokenEstimator() {
+        contextRunner.run(ctx -> {
+            assertThat(ctx).hasSingleBean(PromptTokenEstimator.class);
+            assertThat(ctx.getBean(PromptTokenEstimator.class)).isInstanceOf(CharsPerTokenEstimator.class);
+        });
+    }
+
+    @Test
+    void wiresJtokkitEstimatorWhenEncodingPropertySet() {
+        // Property set + jtokkit on test classpath -> JtokkitPromptTokenEstimator wins
+        // over the chars-per-token default. Bean is still injected as PromptTokenEstimator.
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.token-estimator-encoding=cl100k_base")
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(PromptTokenEstimator.class);
+                    assertThat(ctx.getBean(PromptTokenEstimator.class))
+                            .isInstanceOf(JtokkitPromptTokenEstimator.class);
+                });
+    }
+
+    @Test
+    void invalidEncodingPropertyFailsBeanInitializationAtStartup() {
+        // An unknown encoding name should surface as a bean-initialization failure at
+        // startup (not as a silently-wrong estimator at first call). JtokkitPromptTokenEstimator
+        // throws IllegalArgumentException from its constructor; Spring wraps that and
+        // ApplicationContext fails to start.
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.token-estimator-encoding=not_a_real_encoding")
+                .run(ctx -> {
+                    assertThat(ctx).hasFailed();
+                    assertThat(ctx.getStartupFailure())
+                            .rootCause()
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessageContaining("Unknown jtokkit encoding");
+                });
+    }
+
+    @Test
+    void emptyEncodingPropertyFallsBackToCharsPerToken() {
+        // An empty string for the encoding (e.g. cleared in config) should be treated
+        // the same as unset — chars/4 default, no startup failure.
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.token-estimator-encoding=")
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(PromptTokenEstimator.class);
+                    assertThat(ctx.getBean(PromptTokenEstimator.class))
+                            .isInstanceOf(CharsPerTokenEstimator.class);
+                });
+    }
+
+    @Test
+    void userProvidedTokenEstimatorOverridesDefault() {
+        PromptTokenEstimator userEstimator = req -> 42L;
+        contextRunner
+                .withBean("userTokenEstimator", PromptTokenEstimator.class, () -> userEstimator)
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(PromptTokenEstimator.class);
+                    assertThat(ctx.getBean(PromptTokenEstimator.class)).isSameAs(userEstimator);
+                    // Advisors still wire — they just take the user's estimator.
+                    assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
+                });
     }
 
     @Test

@@ -14,15 +14,15 @@ import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
+import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
+import io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
-import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.chat.prompt.Prompt;
 
 import java.util.Map;
 import java.util.UUID;
@@ -50,33 +50,53 @@ public final class CyclesBudgetLifecycle {
     private final CyclesProperties cyclesProperties;
     private final CyclesSpringAiProperties springAiProperties;
     private final SubjectResolver subjectResolver;
+    private final PromptTokenEstimator tokenEstimator;
 
     /**
-     * Constructs the lifecycle helper with an explicit subject resolver. Public for
-     * cross-package access; not for direct user instantiation (use the advisor/tool
-     * classes that wrap it).
+     * Constructs the lifecycle helper with explicit subject and token-estimator
+     * strategies. Public for cross-package access; not for direct user instantiation
+     * (use the advisor/tool classes that wrap it).
      *
      * @param cyclesClient       Cycles HTTP client.
      * @param cyclesProperties   SDK-level configuration.
      * @param springAiProperties Spring AI integration configuration.
      * @param subjectResolver    resolves the Cycles subject for each reservation.
-     *                           Must not be {@code null}.
+     * @param tokenEstimator     estimates the input-side token count for prompt-based
+     *                           reservation sizing.
+     */
+    public CyclesBudgetLifecycle(CyclesClient cyclesClient,
+                                 CyclesProperties cyclesProperties,
+                                 CyclesSpringAiProperties springAiProperties,
+                                 SubjectResolver subjectResolver,
+                                 PromptTokenEstimator tokenEstimator) {
+        this.cyclesClient = cyclesClient;
+        this.cyclesProperties = cyclesProperties;
+        this.springAiProperties = springAiProperties;
+        this.subjectResolver = subjectResolver;
+        this.tokenEstimator = tokenEstimator;
+    }
+
+    /**
+     * Backward-compatible constructor — uses {@link CharsPerTokenEstimator} as the
+     * default token estimator alongside the supplied subject resolver.
+     *
+     * @param cyclesClient       Cycles HTTP client.
+     * @param cyclesProperties   SDK-level configuration.
+     * @param springAiProperties Spring AI integration configuration.
+     * @param subjectResolver    resolves the Cycles subject for each reservation.
      */
     public CyclesBudgetLifecycle(CyclesClient cyclesClient,
                                  CyclesProperties cyclesProperties,
                                  CyclesSpringAiProperties springAiProperties,
                                  SubjectResolver subjectResolver) {
-        this.cyclesClient = cyclesClient;
-        this.cyclesProperties = cyclesProperties;
-        this.springAiProperties = springAiProperties;
-        this.subjectResolver = subjectResolver;
+        this(cyclesClient, cyclesProperties, springAiProperties,
+                subjectResolver, new CharsPerTokenEstimator());
     }
 
     /**
-     * Convenience constructor that uses {@link PropertiesSubjectResolver} as the default
-     * subject resolver — equivalent to the v0.1.0 / v0.2.0 behavior of building the
-     * subject from {@link CyclesProperties} on every call. Kept for backward
-     * compatibility with code that constructs the lifecycle directly.
+     * Backward-compatible constructor — uses {@link PropertiesSubjectResolver} as the
+     * default subject resolver and {@link CharsPerTokenEstimator} as the default token
+     * estimator. Equivalent to v0.1.0 / v0.2.0 behavior.
      *
      * @param cyclesClient       Cycles HTTP client.
      * @param cyclesProperties   SDK-level configuration (also feeds the default resolver).
@@ -86,7 +106,7 @@ public final class CyclesBudgetLifecycle {
                                  CyclesProperties cyclesProperties,
                                  CyclesSpringAiProperties springAiProperties) {
         this(cyclesClient, cyclesProperties, springAiProperties,
-                new PropertiesSubjectResolver(cyclesProperties));
+                new PropertiesSubjectResolver(cyclesProperties), new CharsPerTokenEstimator());
     }
 
     /**
@@ -245,45 +265,29 @@ public final class CyclesBudgetLifecycle {
     }
 
     /**
-     * Compute the reservation estimate. When {@code estimate-from-prompt=true} and the
-     * request carries non-empty prompt text and at least one cost-per-token rate is set,
-     * derives an estimate from {@code prompt-char-count / 4} approximated tokens × the
-     * sum of the input and output rates (assuming output ≈ input in token count, which
-     * is conservative-ish for most chat workloads). Falls back to {@link #buildEstimateAmount}
-     * (i.e. {@code default-estimate}) when prompt-based estimation isn't applicable.
+     * Compute the reservation estimate. When {@code estimate-from-prompt=true} and at
+     * least one cost-per-token rate is set, asks the configured
+     * {@link PromptTokenEstimator} how many tokens the prompt will use, then multiplies
+     * by the sum of the input and output rates (assuming output ≈ input in token count,
+     * which is conservative-ish for most chat workloads). Falls back to
+     * {@link #buildEstimateAmount} (i.e. {@code default-estimate}) when prompt-based
+     * estimation isn't applicable or yields zero.
      */
     private Amount buildReservationEstimate(ChatClientRequest request) {
         if (springAiProperties.isEstimateFromPrompt() && request != null) {
-            long promptChars = extractPromptCharCount(request);
             long inputRate = springAiProperties.getInputCostPerToken();
             long outputRate = springAiProperties.getOutputCostPerToken();
-            if (promptChars > 0 && (inputRate > 0 || outputRate > 0)) {
-                long estimatedTokens = promptChars / 4;
-                long estimate = estimatedTokens * (inputRate + outputRate);
-                if (estimate > 0) {
-                    return new Amount(resolveUnit(), estimate);
+            if (inputRate > 0 || outputRate > 0) {
+                long estimatedTokens = tokenEstimator.estimateTokens(request);
+                if (estimatedTokens > 0) {
+                    long estimate = estimatedTokens * (inputRate + outputRate);
+                    if (estimate > 0) {
+                        return new Amount(resolveUnit(), estimate);
+                    }
                 }
             }
         }
         return buildEstimateAmount();
-    }
-
-    private static long extractPromptCharCount(ChatClientRequest request) {
-        Prompt prompt = request.prompt();
-        if (prompt == null) {
-            return 0L;
-        }
-        long total = 0L;
-        // Spring AI guarantees a non-null list of non-null Message instances on Prompt.
-        // The text of an individual message can be null (e.g. multimodal messages where
-        // the content is a Media list rather than text), so we skip those.
-        for (Message message : prompt.getInstructions()) {
-            String text = message.getText();
-            if (text != null) {
-                total += text.length();
-            }
-        }
-        return total;
     }
 
     private Amount buildEstimateAmount() {
