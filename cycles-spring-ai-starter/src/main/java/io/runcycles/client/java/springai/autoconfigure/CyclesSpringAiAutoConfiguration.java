@@ -8,6 +8,8 @@ import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
 import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
+import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
+import io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator;
 import io.runcycles.client.java.springai.tool.CyclesToolGate;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
@@ -88,13 +90,34 @@ public class CyclesSpringAiAutoConfiguration {
         return new PropertiesSubjectResolver(cyclesProperties);
     }
 
+    /**
+     * Default {@link PromptTokenEstimator} bean — the chars-per-token heuristic
+     * ({@link CharsPerTokenEstimator}). Preserves v0.2.0 prompt-estimation behavior
+     * when {@code estimate-from-prompt=true}.
+     *
+     * <p>For tighter estimates, supply your own bean — typically a
+     * {@code JtokkitPromptTokenEstimator} (real BPE encoding for OpenAI models —
+     * see that class's javadoc for opt-in details) or a wrapper around your model
+     * provider's tokenizer. {@link ConditionalOnMissingBean} backs this default off
+     * when a user bean is registered.
+     *
+     * @return the default chars-per-token estimator.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public PromptTokenEstimator cyclesPromptTokenEstimator() {
+        return new CharsPerTokenEstimator();
+    }
+
     @Bean
     @ConditionalOnMissingBean
     public CyclesBudgetAdvisor cyclesBudgetAdvisor(CyclesClient cyclesClient,
                                                    CyclesProperties cyclesProperties,
                                                    CyclesSpringAiProperties springAiProperties,
-                                                   SubjectResolver subjectResolver) {
-        return new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties, subjectResolver);
+                                                   SubjectResolver subjectResolver,
+                                                   PromptTokenEstimator tokenEstimator) {
+        return new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties,
+                subjectResolver, tokenEstimator);
     }
 
     /**
@@ -107,6 +130,8 @@ public class CyclesSpringAiAutoConfiguration {
      * @param cyclesClient        the Cycles HTTP client.
      * @param cyclesProperties    SDK-level configuration.
      * @param springAiProperties  Spring AI integration configuration.
+     * @param subjectResolver     resolves the Cycles subject per reservation.
+     * @param tokenEstimator      estimates prompt tokens for prompt-based reservation sizing.
      * @return the streaming budget-gating advisor.
      */
     @Bean
@@ -114,8 +139,10 @@ public class CyclesSpringAiAutoConfiguration {
     public CyclesBudgetStreamAdvisor cyclesBudgetStreamAdvisor(CyclesClient cyclesClient,
                                                                CyclesProperties cyclesProperties,
                                                                CyclesSpringAiProperties springAiProperties,
-                                                               SubjectResolver subjectResolver) {
-        return new CyclesBudgetStreamAdvisor(cyclesClient, cyclesProperties, springAiProperties, subjectResolver);
+                                                               SubjectResolver subjectResolver,
+                                                               PromptTokenEstimator tokenEstimator) {
+        return new CyclesBudgetStreamAdvisor(cyclesClient, cyclesProperties, springAiProperties,
+                subjectResolver, tokenEstimator);
     }
 
     /**

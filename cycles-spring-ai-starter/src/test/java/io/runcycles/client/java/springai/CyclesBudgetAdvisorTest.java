@@ -461,11 +461,10 @@ class CyclesBudgetAdvisorTest {
     void reservationFallsBackToDefaultEstimateWhenPromptEstimationEnabledButRatesAreZero() {
         // estimate-from-prompt=true but no rates set: can't compute a meaningful
         // estimate from chars alone, fall back to default-estimate.
+        // Post-refactor optimization: the lifecycle short-circuits before invoking the
+        // token estimator when rates are zero, so request.prompt() is never read either.
         springAiProperties.setEstimateFromPrompt(true);
-        // rates remain 0 (default)
-
-        Prompt prompt = new Prompt(List.of(new UserMessage("some prompt text")));
-        when(request.prompt()).thenReturn(prompt);
+        // rates remain 0 (default); no request.prompt() stub needed.
 
         ArgumentCaptor<ReservationCreateRequest> reserveCaptor =
                 ArgumentCaptor.forClass(ReservationCreateRequest.class);

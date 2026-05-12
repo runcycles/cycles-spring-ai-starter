@@ -9,6 +9,8 @@ import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
 import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
+import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
+import io.runcycles.client.java.springai.tokenizer.PromptTokenEstimator;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.springframework.ai.chat.client.ChatClient;
@@ -49,6 +51,28 @@ class CyclesSpringAiAutoConfigurationTest {
             CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
             assertThat(props.isEnabled()).isTrue();
         });
+    }
+
+    @Test
+    void wiresDefaultPromptTokenEstimator() {
+        contextRunner.run(ctx -> {
+            assertThat(ctx).hasSingleBean(PromptTokenEstimator.class);
+            assertThat(ctx.getBean(PromptTokenEstimator.class)).isInstanceOf(CharsPerTokenEstimator.class);
+        });
+    }
+
+    @Test
+    void userProvidedTokenEstimatorOverridesDefault() {
+        PromptTokenEstimator userEstimator = req -> 42L;
+        contextRunner
+                .withBean("userTokenEstimator", PromptTokenEstimator.class, () -> userEstimator)
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(PromptTokenEstimator.class);
+                    assertThat(ctx.getBean(PromptTokenEstimator.class)).isSameAs(userEstimator);
+                    // Advisors still wire — they just take the user's estimator.
+                    assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
+                });
     }
 
     @Test
