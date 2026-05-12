@@ -10,7 +10,7 @@ import org.springframework.ai.chat.client.advisor.api.StreamAdvisor;
 import org.springframework.ai.chat.client.advisor.api.StreamAdvisorChain;
 import org.springframework.core.Ordered;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.SignalType;
+import reactor.core.publisher.Mono;
 
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -74,35 +74,69 @@ public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
 
     @Override
     public Flux<ChatClientResponse> adviseStream(ChatClientRequest request, StreamAdvisorChain chain) {
-        // Reserve before subscribing to the upstream. May throw CyclesBudgetDeniedException
-        // or IllegalStateException (fail-closed); both propagate to the caller without
-        // engaging the stream lifecycle.
-        String reservationId = lifecycle.reserveOrFailOpen(request);
+        // Wrap the entire reserve → stream → commit/release chain in Flux.defer so:
+        //
+        //  1. The reservation is created per subscription, not at assembly time. A caller
+        //     that builds the Flux but never subscribes does not leak a reservation; a
+        //     caller that resubscribes gets a fresh reservation per subscription rather
+        //     than reusing the same id across subscriptions.
+        //  2. CyclesBudgetDeniedException and IllegalStateException from reserveOrFailOpen
+        //     surface as onError signals (the reactive-idiomatic shape for a Flux<T>
+        //     pipeline). Subscribers can branch with .onErrorResume(...) and friends.
+        return Flux.defer(() -> {
+            String reservationId = lifecycle.reserveOrFailOpen(request);
 
-        // Track the most-recently-seen element so we have a chance to extract usage
-        // from the final chunk. AtomicReference because Reactor signals can fire on
-        // any thread depending on the scheduler.
-        AtomicReference<ChatClientResponse> lastResponse = new AtomicReference<>();
+            // Track the most-recently-seen element so we have a chance to extract usage
+            // from the final chunk. AtomicReference because Reactor signals can fire on
+            // any thread depending on the scheduler.
+            AtomicReference<ChatClientResponse> lastResponse = new AtomicReference<>();
 
-        return chain.nextStream(request)
-                .doOnNext(lastResponse::set)
-                .doOnError(error -> {
-                    if (reservationId != null) {
-                        lifecycle.releaseQuietly(reservationId,
-                                "chat-stream-failed: " + error.getClass().getSimpleName());
-                    }
-                })
-                .doOnCancel(() -> {
-                    if (reservationId != null) {
-                        lifecycle.releaseQuietly(reservationId, "chat-stream-cancelled");
-                    }
-                })
-                .doFinally(signal -> {
-                    // Commit only on natural completion. ON_ERROR / CANCEL already released
-                    // via their dedicated callbacks; this branch ignores them.
-                    if (reservationId != null && signal == SignalType.ON_COMPLETE) {
-                        lifecycle.commitOrFailOpen(reservationId, lastResponse.get());
-                    }
-                });
+            Flux<ChatClientResponse> upstream;
+            try {
+                upstream = chain.nextStream(request);
+            } catch (RuntimeException assemblyFailure) {
+                // The downstream advisor threw before producing a Flux. We hold a live
+                // reservation with no stream lifecycle to attach to — release it so it
+                // doesn't TTL-expire on the server.
+                if (reservationId != null) {
+                    lifecycle.releaseQuietly(reservationId,
+                            "chat-stream-assembly-failed: " + assemblyFailure.getClass().getSimpleName());
+                }
+                throw assemblyFailure;
+            }
+
+            return upstream
+                    .doOnNext(lastResponse::set)
+                    .doOnError(error -> {
+                        if (reservationId != null) {
+                            lifecycle.releaseQuietly(reservationId,
+                                    "chat-stream-failed: " + error.getClass().getSimpleName());
+                        }
+                    })
+                    .doOnCancel(() -> {
+                        if (reservationId != null) {
+                            lifecycle.releaseQuietly(reservationId, "chat-stream-cancelled");
+                        }
+                    })
+                    // Commit AFTER upstream completes successfully but BEFORE onComplete is
+                    // delivered to the downstream subscriber. doFinally fires after the
+                    // subscriber has already observed completion, which means a commit
+                    // failure cannot fail the stream the way the non-streaming advisor
+                    // fails its call. concatWith with a Mono.defer that commits and
+                    // returns Mono.empty() (or Mono.error on commit failure) puts the
+                    // commit ON the reactive timeline, so commit failures in fail-closed
+                    // mode propagate as onError to subscribers correctly.
+                    .concatWith(Mono.<ChatClientResponse>defer(() -> {
+                        if (reservationId == null) {
+                            return Mono.empty();
+                        }
+                        try {
+                            lifecycle.commitOrFailOpen(reservationId, lastResponse.get());
+                            return Mono.empty();
+                        } catch (RuntimeException commitFailure) {
+                            return Mono.error(commitFailure);
+                        }
+                    }));
+        });
     }
 }

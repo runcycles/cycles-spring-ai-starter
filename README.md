@@ -20,7 +20,9 @@ Per-call lifecycle: **reserve → call → commit** on success, **reserve → ca
 </dependency>
 ```
 
-This transitively pulls in [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) which provides the underlying HTTP client to the Cycles server.
+> **Note on versions.** `0.1.0` is the latest **released** version on Maven Central. Features documented below under "What's new in `0.2.0-SNAPSHOT`" — tool gating via `CyclesToolGate`, the `CyclesChatClientObservationConvention`, prompt-based per-call estimates (`estimate-from-prompt`), per-token cost rates (`input-cost-per-token` / `output-cost-per-token`), and streaming gating via `CyclesBudgetStreamAdvisor` — are not in `0.1.0`. They land in the upcoming `0.2.0` release; until then they're available by building `cycles-spring-ai-starter:0.2.0-SNAPSHOT` from `main` and installing locally (`mvn -B install --file cycles-spring-ai-starter/pom.xml -DskipTests`).
+
+This dependency transitively pulls in [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) which provides the underlying HTTP client to the Cycles server.
 
 ### 2. Configure connection + subject
 

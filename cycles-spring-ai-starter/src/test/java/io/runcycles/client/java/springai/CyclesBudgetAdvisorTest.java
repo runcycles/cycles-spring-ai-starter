@@ -827,8 +827,12 @@ class CyclesBudgetAdvisorTest {
     }
 
     @Test
-    void commitHandlesNullTokenCountsInUsage() {
-        // Usage object exists but tokens are null (some providers do this on errors).
+    void commitFallsBackToEstimateWhenBothTokenBreakdownsAreNull() {
+        // A Usage object that returns null for BOTH promptTokens AND completionTokens is
+        // "provider didn't populate the breakdown" — treating it as zeros would silently
+        // under-bill. The lifecycle falls back to the estimate in this case.
+        // (Compare: a Usage that returns 0 for both is "no work done" — that's a real
+        // signal of a zero-cost call and is NOT covered here.)
         springAiProperties.setInputCostPerToken(25L);
         springAiProperties.setOutputCostPerToken(100L);
 
@@ -838,7 +842,6 @@ class CyclesBudgetAdvisorTest {
         when(response.chatResponse()).thenReturn(chatResponse);
         when(chatResponse.getMetadata()).thenReturn(metadata);
         when(metadata.getUsage()).thenReturn(usage);
-        // Both token counts null
         when(usage.getPromptTokens()).thenReturn(null);
         when(usage.getCompletionTokens()).thenReturn(null);
 
@@ -851,11 +854,93 @@ class CyclesBudgetAdvisorTest {
 
         advisor.adviseCall(request, chain);
 
-        CommitRequest sent = commitCaptor.getValue();
-        // nullSafeLong → 0 for both, so 0*25 + 0*100 = 0 → commits zero, not estimate.
-        // (This is intentional: usage present with zeros is a real signal of "no work done"
-        // — the LLM call happened but no tokens consumed. Different from "usage missing".)
-        assertThat(sent.getActual().getAmount()).isEqualTo(0L);
+        assertThat(commitCaptor.getValue().getActual().getAmount()).isEqualTo(1000L); // estimate
+    }
+
+    @Test
+    void commitUsesAvailableBreakdownWhenOnlyOneSideIsNull() {
+        // Some providers populate only prompt tokens during streaming, or only completion
+        // tokens on certain response shapes. We bill what we have rather than fall back.
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(100);
+        when(usage.getCompletionTokens()).thenReturn(null);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        // 100 * 25 + 0 * 100 = 2500 (one side null, the other counted)
+        assertThat(commitCaptor.getValue().getActual().getAmount()).isEqualTo(2500L);
+    }
+
+    @Test
+    void commitUsesAvailableBreakdownWhenOnlyPromptTokensAreNull() {
+        // Mirror of commitUsesAvailableBreakdownWhenOnlyOneSideIsNull but with the OTHER
+        // side null — covers the second arm of the &&-short-circuit in the all-null check.
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(null);
+        when(usage.getCompletionTokens()).thenReturn(50);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        // 0 * 25 + 50 * 100 = 5000 (prompt side null but completion is counted)
+        assertThat(commitCaptor.getValue().getActual().getAmount()).isEqualTo(5000L);
+    }
+
+    @Test
+    void commitChargesZeroWhenBothBreakdownsAreLiteralZero() {
+        // Distinct from the null/null case above: literal zeros mean "no work done"
+        // (a real provider signal — e.g. a call that produced no completion). Bill 0.
+        springAiProperties.setInputCostPerToken(25L);
+        springAiProperties.setOutputCostPerToken(100L);
+
+        ChatResponse chatResponse = mock(ChatResponse.class);
+        ChatResponseMetadata metadata = mock(ChatResponseMetadata.class);
+        Usage usage = mock(Usage.class);
+        when(response.chatResponse()).thenReturn(chatResponse);
+        when(chatResponse.getMetadata()).thenReturn(metadata);
+        when(metadata.getUsage()).thenReturn(usage);
+        when(usage.getPromptTokens()).thenReturn(0);
+        when(usage.getCompletionTokens()).thenReturn(0);
+
+        ArgumentCaptor<CommitRequest> commitCaptor = ArgumentCaptor.forClass(CommitRequest.class);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), commitCaptor.capture()))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        advisor.adviseCall(request, chain);
+
+        assertThat(commitCaptor.getValue().getActual().getAmount()).isEqualTo(0L);
     }
 
     // ---- Estimate unit override -----------------------------------------

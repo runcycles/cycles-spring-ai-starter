@@ -304,8 +304,18 @@ public final class CyclesBudgetLifecycle {
         long inputRate = springAiProperties.getInputCostPerToken();
         long outputRate = springAiProperties.getOutputCostPerToken();
         if (usage != null && (inputRate > 0 || outputRate > 0)) {
-            long actual = (nullSafeLong(usage.getPromptTokens()) * inputRate)
-                        + (nullSafeLong(usage.getCompletionTokens()) * outputRate);
+            Integer promptTokens = usage.getPromptTokens();
+            Integer completionTokens = usage.getCompletionTokens();
+            // A Usage object that returns null for BOTH breakdown fields is "I have no
+            // idea" (provider didn't populate the response), not "no work done". Treating
+            // it as zero would silently under-bill — fall back to the estimate instead.
+            // When only one breakdown is missing we still bill what we have (some
+            // providers populate prompt tokens only during streaming, for example).
+            if (promptTokens == null && completionTokens == null) {
+                return buildEstimateAmount();
+            }
+            long actual = (nullSafeLong(promptTokens) * inputRate)
+                        + (nullSafeLong(completionTokens) * outputRate);
             return new Amount(unit, actual);
         }
 

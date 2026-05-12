@@ -190,10 +190,11 @@ class CyclesBudgetStreamAdvisorTest {
     // ---- Reservation denial --------------------------------------------
 
     @Test
-    void reserveDenyThrowsSynchronouslyWithoutSubscribing() {
-        // CyclesBudgetDeniedException is thrown from reserveOrFailOpen during
-        // adviseStream invocation, BEFORE the chain is subscribed. The Flux is never
-        // returned — the exception propagates up to the caller.
+    void reserveDenySurfacesAsOnErrorOnSubscription() {
+        // Because the whole adviseStream pipeline is wrapped in Flux.defer, the reserve
+        // happens at subscription time, not at assembly time. A denial therefore surfaces
+        // as an onError on the Flux rather than as a synchronous throw from adviseStream.
+        // This is the reactive-idiomatic shape — subscribers can branch with onErrorResume.
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(CyclesResponse.success(200, Map.of(
                         "decision", "DENY",
@@ -201,14 +202,143 @@ class CyclesBudgetStreamAdvisorTest {
                         "scope_path", "tenant/acme"
                 )));
 
-        try {
-            advisor.adviseStream(request, chain);
-            assertThat(false).as("expected CyclesBudgetDeniedException").isTrue();
-        } catch (CyclesBudgetDeniedException denied) {
-            assertThat(denied.getReasonCode()).isEqualTo("BUDGET_EXCEEDED");
-        }
+        StepVerifier.create(advisor.adviseStream(request, chain))
+                .expectErrorSatisfies(error -> {
+                    assertThat(error).isInstanceOf(CyclesBudgetDeniedException.class);
+                    assertThat(((CyclesBudgetDeniedException) error).getReasonCode())
+                            .isEqualTo("BUDGET_EXCEEDED");
+                })
+                .verify();
+
+        // Chain is never engaged because reserve failed before chain.nextStream was called.
+        verifyNoInteractions(chain);
+    }
+
+    @Test
+    void reserveTransportFailureSurfacesAsOnErrorWhenFailClosed() {
+        // Fail-closed transport failure on reserve now becomes onError (was previously
+        // a synchronous throw). Subscribers handle it as any other stream failure.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenThrow(new RuntimeException("connection refused"));
+
+        StepVerifier.create(advisor.adviseStream(request, chain))
+                .expectErrorSatisfies(error -> {
+                    assertThat(error).isInstanceOf(IllegalStateException.class);
+                    assertThat(error.getMessage()).contains("Cycles reservation failed");
+                })
+                .verify();
 
         verifyNoInteractions(chain);
+    }
+
+    @Test
+    void noReservationHappensWhenFluxIsNeverSubscribed() {
+        // Pre-refactor bug: reserveOrFailOpen ran at adviseStream assembly time. A caller
+        // that built the Flux but never subscribed would leak a reservation server-side
+        // (until TTL). Post-refactor: defer ensures reserve runs at subscription time only.
+        Flux<ChatClientResponse> stream = advisor.adviseStream(request, chain);
+
+        // Built the Flux but did NOT subscribe. No reservation should have been created.
+        verifyNoInteractions(cyclesClient);
+        verifyNoInteractions(chain);
+        // (the returned Flux is otherwise unused; we just verify the side effects)
+        assertThat(stream).isNotNull();
+    }
+
+    @Test
+    void eachSubscriptionGetsItsOwnReservation() {
+        // Pre-refactor bug: assembly-time reserve meant resubscribing to the same Flux
+        // reused one reservationId across subscriptions, with the second subscription
+        // attempting commit/release on an already-finalized reservation. Defer fixes this.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-sub-1"))
+                .thenReturn(reservationAllow("res-sub-2"));
+        when(chain.nextStream(request)).thenReturn(Flux.just(chunk1));
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        Flux<ChatClientResponse> stream = advisor.adviseStream(request, chain);
+
+        StepVerifier.create(stream).expectNext(chunk1).verifyComplete();
+        StepVerifier.create(stream).expectNext(chunk1).verifyComplete();
+
+        // Two distinct reservations created and committed.
+        verify(cyclesClient).commitReservation(eq("res-sub-1"), any(CommitRequest.class));
+        verify(cyclesClient).commitReservation(eq("res-sub-2"), any(CommitRequest.class));
+    }
+
+    @Test
+    void chainAssemblyFailureReleasesReservation() {
+        // chain.nextStream(request) throws synchronously during assembly. We already
+        // reserved — must release rather than leak, then propagate the throw as onError.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-assembly"));
+        RuntimeException assemblyFailure = new RuntimeException("upstream advisor blew up");
+        when(chain.nextStream(request)).thenThrow(assemblyFailure);
+        when(cyclesClient.releaseReservation(anyString(), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        StepVerifier.create(advisor.adviseStream(request, chain))
+                .expectErrorSatisfies(error -> assertThat(error).isSameAs(assemblyFailure))
+                .verify();
+
+        verify(cyclesClient).releaseReservation(eq("res-assembly"), any(ReleaseRequest.class));
+        verify(cyclesClient, never()).commitReservation(anyString(), any(CommitRequest.class));
+    }
+
+    @Test
+    void chainAssemblyFailureUnderFailOpenReserveSkipDoesNotAttemptRelease() {
+        // fail-open + reserve transport failure → reservationId=null. Then chain.nextStream
+        // throws during assembly. We should NOT attempt to release (no reservation to
+        // release) and we should propagate the assembly failure as onError.
+        springAiProperties.setFailOpen(true);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenThrow(new RuntimeException("connection refused"));
+        RuntimeException assemblyFailure = new RuntimeException("upstream advisor blew up");
+        when(chain.nextStream(request)).thenThrow(assemblyFailure);
+
+        StepVerifier.create(advisor.adviseStream(request, chain))
+                .expectErrorSatisfies(error -> assertThat(error).isSameAs(assemblyFailure))
+                .verify();
+
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
+    @Test
+    void commitFailureOnStreamCompleteSurfacesAsOnErrorWhenFailClosed() {
+        // Pre-refactor bug: commit ran in doFinally, which fires AFTER onComplete has been
+        // delivered to the subscriber. A commit failure in fail-closed mode couldn't fail
+        // the stream the way the non-streaming advisor fails its call. concatWith puts
+        // the commit ON the timeline so the failure surfaces correctly.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-commit-fail"));
+        when(chain.nextStream(request)).thenReturn(Flux.just(chunk1));
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenThrow(new RuntimeException("commit transport failure"));
+
+        StepVerifier.create(advisor.adviseStream(request, chain))
+                .expectNext(chunk1)
+                .expectErrorSatisfies(error -> {
+                    assertThat(error).isInstanceOf(IllegalStateException.class);
+                    assertThat(error.getMessage()).contains("commit failed");
+                })
+                .verify();
+    }
+
+    @Test
+    void commitFailureOnStreamCompleteSwallowedWhenFailOpen() {
+        // fail-open=true: commit failures are logged and the stream completes normally
+        // (no onError to the subscriber).
+        springAiProperties.setFailOpen(true);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-commit-open"));
+        when(chain.nextStream(request)).thenReturn(Flux.just(chunk1));
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenThrow(new RuntimeException("commit transport failure"));
+
+        StepVerifier.create(advisor.adviseStream(request, chain))
+                .expectNext(chunk1)
+                .verifyComplete();
     }
 
     @Test
