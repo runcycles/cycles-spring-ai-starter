@@ -51,6 +51,21 @@ public class CyclesSpringAiProperties {
     private String actionName = "spring-ai-chat";
 
     /**
+     * Action kind reported to Cycles for tool invocations gated through
+     * {@link io.runcycles.client.java.springai.tool.CyclesToolCallback}.
+     * Default: {@code tool.call}.
+     */
+    private String toolActionKind = "tool.call";
+
+    /**
+     * Action name prefix reported to Cycles for tool invocations. The wrapped tool's
+     * name (from its {@code ToolDefinition}) is appended to this prefix so audit
+     * history shows e.g. {@code spring-ai-tool:get_weather}.
+     * Default: {@code spring-ai-tool:}.
+     */
+    private String toolActionNamePrefix = "spring-ai-tool:";
+
+    /**
      * When true, advisor errors (e.g. Cycles server unreachable) are logged and the
      * call proceeds. When false, the advisor surfaces the error to the caller.
      * Budget denials ({@link io.runcycles.client.java.springai.CyclesBudgetDeniedException})
@@ -191,6 +206,36 @@ public class CyclesSpringAiProperties {
      * @param actionName the action name.
      */
     public void setActionName(String actionName) { this.actionName = actionName; }
+
+    /**
+     * Returns the tool action kind label.
+     *
+     * @return the tool action kind.
+     */
+    public String getToolActionKind() { return toolActionKind; }
+
+    /**
+     * Sets the tool action kind label.
+     *
+     * @param toolActionKind the tool action kind.
+     */
+    public void setToolActionKind(String toolActionKind) { this.toolActionKind = toolActionKind; }
+
+    /**
+     * Returns the tool action name prefix.
+     *
+     * @return the tool action name prefix.
+     */
+    public String getToolActionNamePrefix() { return toolActionNamePrefix; }
+
+    /**
+     * Sets the tool action name prefix. The wrapped tool's name is appended.
+     *
+     * @param toolActionNamePrefix the prefix.
+     */
+    public void setToolActionNamePrefix(String toolActionNamePrefix) {
+        this.toolActionNamePrefix = toolActionNamePrefix;
+    }
 
     /**
      * Returns whether transport-level advisor errors are tolerated.

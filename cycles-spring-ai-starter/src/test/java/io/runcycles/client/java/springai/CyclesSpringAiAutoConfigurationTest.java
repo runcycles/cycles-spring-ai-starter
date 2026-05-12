@@ -91,7 +91,9 @@ class CyclesSpringAiAutoConfigurationTest {
                         "cycles.spring-ai.action-kind=llm.completion",
                         "cycles.spring-ai.action-name=gpt-4o",
                         "cycles.spring-ai.fail-open=true",
-                        "cycles.spring-ai.estimate-from-prompt=true"
+                        "cycles.spring-ai.estimate-from-prompt=true",
+                        "cycles.spring-ai.tool-action-kind=tool.exec",
+                        "cycles.spring-ai.tool-action-name-prefix=my-tool:"
                 )
                 .run(ctx -> {
                     CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
@@ -102,6 +104,8 @@ class CyclesSpringAiAutoConfigurationTest {
                     assertThat(props.getActionKind()).isEqualTo("llm.completion");
                     assertThat(props.getActionName()).isEqualTo("gpt-4o");
                     assertThat(props.isEstimateFromPrompt()).isTrue();
+                    assertThat(props.getToolActionKind()).isEqualTo("tool.exec");
+                    assertThat(props.getToolActionNamePrefix()).isEqualTo("my-tool:");
                 });
     }
 

@@ -26,8 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added (continued)
 - **Prompt-based reservation estimate.** New `cycles.spring-ai.estimate-from-prompt` boolean property (default false). When enabled with `input-cost-per-token` and/or `output-cost-per-token` set, the pre-call reservation is computed from the prompt char count rather than the fixed `default-estimate`. Token approximation: `prompt-chars / 4`; reservation amount: `tokens × (inputRate + outputRate)` (assuming output ≈ input). Falls back to `default-estimate` when prompt text is empty, rates are 0, or the computed estimate would be 0.
 
+### Added (continued)
+- **Tool-level budget gating via `CyclesToolCallback`.** New wrapper class around Spring AI `ToolCallback` that reserves before each tool invocation, commits on success, releases on exception. Action labels reported separately from chat: `cycles.spring-ai.tool-action-kind` (default `tool.call`) and `cycles.spring-ai.tool-action-name-prefix` (default `spring-ai-tool:`, the wrapped tool's name is appended). Auto-configured `CyclesToolGate` factory bean — users opt in by calling `cyclesToolGate.wrap(myTool)` where they construct their tools.
+- **`CyclesBudgetLifecycle`** promoted from package-private to public (internal API marker via javadoc) to support the tool package. Methods on the lifecycle now accept explicit action-kind / action-name labels so tool reservations are distinguishable from chat reservations in audit history.
+
 ### Still pending for v0.2
-- `ToolCallback` decoration (tool-level authority gates).
 - `ObservationConvention` (richer audit-trail attribution).
 
 ## [0.1.0] — 2026-05-12

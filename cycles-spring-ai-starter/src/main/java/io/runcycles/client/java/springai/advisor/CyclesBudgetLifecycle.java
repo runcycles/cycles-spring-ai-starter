@@ -27,18 +27,21 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Reserve / commit / release lifecycle shared by both the call and stream advisors.
+ * Reserve / commit / release lifecycle shared by the chat advisors and the tool callback
+ * wrapper.
  *
- * <p>Both {@link CyclesBudgetAdvisor} (non-streaming) and {@code CyclesBudgetStreamAdvisor}
- * (streaming) need the same reservation-against-Cycles plumbing — wire calls, fail-open
- * handling, actual-amount extraction from {@code ChatResponse.Usage}. This class collects
- * that logic so the two advisor classes are thin wrappers that supply the right reactive
- * vs imperative glue.
+ * <p>Used by {@link CyclesBudgetAdvisor} (non-streaming chat),
+ * {@link CyclesBudgetStreamAdvisor} (streaming chat), and
+ * {@code CyclesToolCallback} (per-tool gating). Centralizes the reservation-against-Cycles
+ * plumbing — wire calls, fail-open handling, actual-amount extraction from
+ * {@code ChatResponse.Usage}.
  *
- * <p>Package-private — not part of the public API. The public surface lives on the advisor
- * classes themselves and the {@link CyclesSpringAiProperties} configuration block.
+ * <p><strong>Internal API.</strong> Public for cross-package access only. Not part of the
+ * stable user-facing surface — methods may change between minor releases. The stable
+ * surface is the advisor classes, the {@code CyclesToolCallback}/{@code CyclesToolGate}
+ * factory, and the {@link CyclesSpringAiProperties} configuration block.
  */
-final class CyclesBudgetLifecycle {
+public final class CyclesBudgetLifecycle {
 
     private static final Logger log = LoggerFactory.getLogger(CyclesBudgetLifecycle.class);
 
@@ -46,27 +49,47 @@ final class CyclesBudgetLifecycle {
     private final CyclesProperties cyclesProperties;
     private final CyclesSpringAiProperties springAiProperties;
 
-    CyclesBudgetLifecycle(CyclesClient cyclesClient,
-                          CyclesProperties cyclesProperties,
-                          CyclesSpringAiProperties springAiProperties) {
+    /**
+     * Constructs the lifecycle helper. Public for cross-package access; not for direct
+     * user instantiation (use the advisor/tool classes that wrap it).
+     *
+     * @param cyclesClient       Cycles HTTP client.
+     * @param cyclesProperties   SDK-level configuration.
+     * @param springAiProperties Spring AI integration configuration.
+     */
+    public CyclesBudgetLifecycle(CyclesClient cyclesClient,
+                                 CyclesProperties cyclesProperties,
+                                 CyclesSpringAiProperties springAiProperties) {
         this.cyclesClient = cyclesClient;
         this.cyclesProperties = cyclesProperties;
         this.springAiProperties = springAiProperties;
     }
 
     /**
-     * Creates a Cycles reservation for the upcoming chat invocation.
+     * Chat-flavored reservation — uses the configured chat action labels
+     * ({@code cycles.spring-ai.action-kind} / {@code action-name}).
      *
-     * @param request the originating ChatClientRequest, used for prompt-based estimation
-     *                when {@code cycles.spring-ai.estimate-from-prompt=true}. May be null
-     *                for non-chat callers (e.g. tool-callback wrappers).
-     * @return the reservation id when the call should proceed, or null when fail-open
-     *         is engaged and no reservation was created.
-     * @throws CyclesBudgetDeniedException when the Cycles server denies the call.
-     * @throws IllegalStateException on transport/HTTP failure when fail-open=false.
+     * @param request the originating ChatClientRequest. Used for prompt-based estimation
+     *                when {@code estimate-from-prompt=true}. May be null.
+     * @return reservation id or null on fail-open skip.
      */
-    String reserveOrFailOpen(ChatClientRequest request) {
-        ReservationCreateRequest req = buildReservationRequest(request);
+    public String reserveOrFailOpen(ChatClientRequest request) {
+        return reserveOrFailOpen(request,
+                springAiProperties.getActionKind(),
+                springAiProperties.getActionName());
+    }
+
+    /**
+     * Reservation with explicit action labels — used by the tool-callback wrapper to
+     * distinguish tool invocations from chat invocations in Cycles audit history.
+     *
+     * @param request    originating request for prompt-based estimation, or null.
+     * @param actionKind action kind label to report (e.g. {@code llm.chat}, {@code tool.call}).
+     * @param actionName action name label to report (e.g. tool name).
+     * @return reservation id or null on fail-open skip.
+     */
+    public String reserveOrFailOpen(ChatClientRequest request, String actionKind, String actionName) {
+        ReservationCreateRequest req = buildReservationRequest(request, actionKind, actionName);
         CyclesResponse<Map<String, Object>> response;
         try {
             response = cyclesClient.createReservation(req);
@@ -128,7 +151,7 @@ final class CyclesBudgetLifecycle {
      * @param chatResponse  the chat response (may be null when invoked from streaming
      *                      paths that didn't observe any emitted element).
      */
-    void commitOrFailOpen(String reservationId, ChatClientResponse chatResponse) {
+    public void commitOrFailOpen(String reservationId, ChatClientResponse chatResponse) {
         CommitRequest commit = CommitRequest.builder()
                 .idempotencyKey(UUID.randomUUID().toString())
                 .actual(buildActualAmount(chatResponse))
@@ -164,7 +187,7 @@ final class CyclesBudgetLifecycle {
      * will TTL-expire on the server anyway, so a failed release is a logging concern,
      * not a runtime one.
      */
-    void releaseQuietly(String reservationId, String reason) {
+    public void releaseQuietly(String reservationId, String reason) {
         ReleaseRequest release = ReleaseRequest.builder()
                 .idempotencyKey(UUID.randomUUID().toString())
                 .reason(reason)
@@ -183,11 +206,13 @@ final class CyclesBudgetLifecycle {
 
     // ── Helpers shared between reservation build and actual-amount build ───────────────
 
-    private ReservationCreateRequest buildReservationRequest(ChatClientRequest request) {
+    private ReservationCreateRequest buildReservationRequest(ChatClientRequest request,
+                                                              String actionKind,
+                                                              String actionName) {
         return ReservationCreateRequest.builder()
                 .idempotencyKey(UUID.randomUUID().toString())
                 .subject(buildSubject())
-                .action(new Action(springAiProperties.getActionKind(), springAiProperties.getActionName(), null))
+                .action(new Action(actionKind, actionName, null))
                 .estimate(buildReservationEstimate(request))
                 .build();
     }

@@ -5,6 +5,7 @@ import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
+import io.runcycles.client.java.springai.tool.CyclesToolGate;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -118,5 +119,27 @@ public class CyclesSpringAiAutoConfiguration {
     public ChatClientCustomizer cyclesChatClientCustomizer(CyclesBudgetAdvisor callAdvisor,
                                                            CyclesBudgetStreamAdvisor streamAdvisor) {
         return builder -> builder.defaultAdvisors(callAdvisor, streamAdvisor);
+    }
+
+    /**
+     * Tool-callback gate factory bean. Lets users opt into Cycles gating on tool
+     * invocations by calling {@code cyclesToolGate.wrap(myTool)} where they construct
+     * their tools.
+     *
+     * <p>Unlike the chat advisors, tool gating is not auto-applied — Spring AI does not
+     * provide a hook to intercept every tool registration, so users explicitly choose
+     * which tools to gate.
+     *
+     * @param cyclesClient       the Cycles HTTP client.
+     * @param cyclesProperties   SDK-level configuration.
+     * @param springAiProperties Spring AI integration configuration.
+     * @return the tool gate factory.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public CyclesToolGate cyclesToolGate(CyclesClient cyclesClient,
+                                         CyclesProperties cyclesProperties,
+                                         CyclesSpringAiProperties springAiProperties) {
+        return new CyclesToolGate(cyclesClient, cyclesProperties, springAiProperties);
     }
 }
