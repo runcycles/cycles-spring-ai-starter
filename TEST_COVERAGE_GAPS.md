@@ -2,35 +2,34 @@
 
 This file tracks known coverage shortfalls against the project's **95%-or-higher coverage rule** (see [CLAUDE.md](./CLAUDE.md)). Entries are removed as gaps are closed.
 
-## Current state
+## Current state (v0.1.0)
 
 - Library bundle (`cycles-spring-ai-starter`): **100% instruction coverage** (jacoco `check` passes; rule is BUNDLE INSTRUCTION ≥ 95%).
 - Demo module (`cycles-spring-ai-demo`): not subject to the rule (not published).
 
-The scaffold ships covered, including:
-- `CyclesSpringAiProperties` — all getters/setters, all four properties.
-- `CyclesSpringAiAutoConfiguration` — wiring contract (enabled / disabled / defaults / all-properties-set).
-- `CyclesBudgetAdvisor` — `getName()`, `getOrder()`, `adviseCall()` pass-through.
+Covered:
+- `CyclesSpringAiProperties` — all getters/setters across 6 properties.
+- `CyclesSpringAiAutoConfiguration` — wiring matrix (enabled / disabled / no-CyclesClient / property-defaults / all-properties-set).
+- `CyclesBudgetAdvisor` — full reserve → call → commit happy path; deny → throw without call; reserve transport-failure × fail-open/fail-closed; reserve HTTP-failure × fail-open/fail-closed; unparseable reservation response; commit transport-failure × fail-open/fail-closed; commit HTTP-failure fail-closed; chain exception → release; release failure doesn't mask original; fail-open + chain exception skip release; unrecognized estimate unit fallback. 17 distinct test methods covering 13 distinct branches.
+- `CyclesBudgetDeniedException` — reasonCode / scopePath accessors covered transitively via deny path.
 
 ## Open gaps
 
-None at scaffold stage.
+None at v0.1.0.
 
-## Test gaps that will open with v0.1.0
+## Test gaps that will open in v0.2
 
-When `CyclesBudgetAdvisor` gains real budget-gating logic, the following branches will need coverage to keep the 95% bar:
+When new functionality lands, the following branches will need coverage to keep the 95% bar:
 
-- Pre-call: assertion that budget-id is read from properties and forwarded to the Cycles client.
-- Pre-call: assertion that the call is denied when the Cycles server reports over-budget.
-- Post-call: assertion that `Usage` from `ChatResponse` is recorded back to Cycles.
-- Error path: `failOpen=true` logs and proceeds; `failOpen=false` re-throws.
+- **Streaming (`StreamAdvisor`)**: pre/post hooks, error paths, fail-open variants — mirror the call-advisor test matrix.
+- **Per-call estimate derivation**: when the estimate is computed from prompt token count, test the edge cases (empty prompt, oversized prompt, missing tokenizer for model).
+- **Token-usage commit**: when commit reads real `ChatResponse.Usage`, cover the provider-specific paths (OpenAI usage shape, Anthropic shape, missing/null usage).
+- **`ToolCallback` decoration**: pre-tool authority check denies, decorated tool preserves metadata (name/description/JSON schema), wrapped tool's return value is forwarded unchanged.
+- **`ObservationConvention`**: high-cardinality vs low-cardinality keys, subject/tenant attribution propagation through observation context.
 
-When `CyclesToolCallbackDecorator` lands (v0.2):
-- Assertion that wrapped tool's metadata (name, description, JSON schema) is preserved.
-- Assertion that pre-tool authority check denies before the wrapped tool executes.
+## Test strategy notes
 
-## Test strategy
-
-1. Unit tests with `MockChatModel` (Spring AI provides this in its test support) for the advisor's pre/post hooks.
-2. Slice tests with `ApplicationContextRunner` for the auto-configuration matrix (enabled/disabled × on-classpath/off-classpath × property-validity). The current four tests already do this.
-3. Integration test against ollama in Testcontainers for end-to-end advisor behavior with a real chat model (gated to nightly CI to keep PR CI fast). Lands with v0.1.0.
+- All unit tests use Mockito for `CyclesClient`. There is no live Cycles server in the unit-test suite — that's `cycles-server` integration territory, not Spring AI starter territory.
+- The auto-configuration tests stub `CyclesClient` to satisfy `@ConditionalOnBean(CyclesClient.class)`.
+- For v0.2, plan to add an integration test using Spring AI's `MockChatModel` so we can verify advisor attachment + behavior end-to-end without needing a real LLM provider.
+- A Testcontainers-ollama smoke test is appropriate for a nightly CI job once v0.2 has real usage extraction, but is overkill for PR CI.

@@ -4,70 +4,120 @@
 
 # Cycles Spring AI Starter — runtime authority for Spring AI agents
 
-**Spring AI advisor + auto-configuration that adds budget enforcement, action authority, and audit trails to ChatClient invocations.** Integrates with the [Cycles Protocol](https://github.com/runcycles/cycles-protocol) for runtime authority over LLM spend, tool actions, and per-tenant agent governance — multi-tenant, observable, and Spring AI-native.
+**Spring AI advisor + auto-configuration that adds budget enforcement to `ChatClient` invocations.** Integrates with the [Cycles Protocol](https://github.com/runcycles/cycles-protocol) for runtime authority over LLM spend, multi-tenant agent governance, and tamper-evident audit. Built for production Spring AI applications that need to gate LLM calls *before* they hit the provider.
 
-Built for production Spring AI applications that need to gate LLM calls *before* they hit the provider (budget exceeded → deny), wrap tool invocations with approval policies, and emit a tamper-evident audit trail tied to subject/tenant attribution. Compatible with Java 21+, Spring Boot 3.5+, and Spring AI 1.0+.
+Per-call lifecycle: **reserve → call → commit** on success, **reserve → call → release** on exception. When the Cycles server denies the reservation, the LLM call never happens and a `CyclesBudgetDeniedException` is thrown. Compatible with Java 21+, Spring Boot 3.5+, and Spring AI 1.0+.
 
-> **Status:** scaffolding. v0.1.0 has not shipped yet; see [CHANGELOG.md](./CHANGELOG.md) and [TEST_COVERAGE_GAPS.md](./TEST_COVERAGE_GAPS.md) for what's pending. For a production-ready Spring Boot integration on the non-Spring-AI path (generic `@Cycles` annotation, SpEL routing), use [cycles-spring-boot-starter](https://github.com/runcycles/cycles-spring-boot-starter) (`io.runcycles:cycles-client-java-spring`).
+## Quick start
 
-## What it does
-
-Spring AI gives you observability via Micrometer (traces, metrics, observation conventions). It does **not** give you:
-
-- **Budget enforcement** — pre-call gate that denies invocations when a tenant/subject is over budget.
-- **Action authority** — human-in-the-loop or rule-based approval for sensitive tool calls.
-- **Cross-call correlation with attribution** — tying agent behavior back to a specific subject/tenant for audit.
-- **Cost / token tracking against budget** — recording actual usage against committed reservations.
-
-This starter wires Cycles' runtime authority into Spring AI's extension points so you get all four without writing glue code.
-
-## Insertion points used
-
-| Cycles capability | Spring AI extension point |
-|---|---|
-| Budget enforcement (pre-call gate) | `CallAdvisor` (chat advisors) |
-| Action authority / approval gates | `ToolCallback` decorator |
-| Audit trail with attribution | `ObservationConvention` + `Observation.Handler` |
-| Cost / token tracking | Post-`CallAdvisor` hook reading `ChatResponse.Usage` |
-
-## Quick start (planned — v0.1.0)
-
-Add the starter:
+### 1. Add the dependency
 
 ```xml
 <dependency>
-  <groupId>io.runcycles</groupId>
-  <artifactId>cycles-spring-ai-starter</artifactId>
-  <version>0.1.0</version>
+    <groupId>io.runcycles</groupId>
+    <artifactId>cycles-spring-ai-starter</artifactId>
+    <version>0.1.0</version>
 </dependency>
 ```
 
-Configure in `application.yml`:
+This transitively pulls in [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) which provides the underlying HTTP client to the Cycles server.
+
+### 2. Configure connection + subject
+
+In `application.yml`:
 
 ```yaml
 cycles:
-  spring-ai:
-    enabled: true
-    budget-id: my-tenant-budget
-    server-url: http://cycles-server:8080
-    fail-open: false
+  base-url: http://localhost:7878      # Cycles server URL
+  api-key:  ${CYCLES_API_KEY}          # provisioned via Cycles Admin
+  tenant:    acme-corp                 # subject defaults applied to every call
+  workspace: production
+  app:       order-agent
+
+cycles.spring-ai:
+  enabled: true                        # default true; set false to bypass
+  default-estimate: 1000               # default per-call estimate (USD_MICROCENTS)
+  estimate-unit: USD_MICROCENTS        # also accepts TOKENS, CREDITS, RISK_POINTS
+  action-kind: llm.chat
+  action-name: spring-ai-chat
+  fail-open: false                     # true = log + proceed on transport errors
 ```
 
-That's it — the auto-configuration wires the `CyclesBudgetAdvisor` onto the auto-configured `ChatClient.Builder`. All `ChatClient` invocations now pass through Cycles for budget enforcement before reaching the LLM, and usage is recorded back after the response returns.
+The first block (`cycles.*`) is owned by the underlying `cycles-client-java-spring` SDK; the second block (`cycles.spring-ai.*`) is owned by this starter.
 
-## How it sits alongside cycles-spring-boot-starter
+### 3. Use ChatClient normally
 
-If your app uses Spring AI: depend on `cycles-spring-ai-starter` (this).
+```java
+@Service
+public class OrderAgent {
+    private final ChatClient chatClient;
 
-If your app uses non-Spring-AI Spring Boot (generic AOP via `@Cycles` annotation, SpEL routing): depend on [`cycles-spring-boot-starter`](https://github.com/runcycles/cycles-spring-boot-starter).
+    public OrderAgent(ChatClient.Builder builder) {
+        this.chatClient = builder.build();
+    }
 
-You can depend on both if you have a mixed codebase — the two starters wire on different conditions and do not conflict.
+    public String summarize(String order) {
+        // Cycles reserves budget BEFORE this call hits the LLM provider.
+        // If the budget is exhausted, CyclesBudgetDeniedException is thrown
+        // and the LLM call never happens. On success, usage is committed
+        // back to Cycles. On exception, the reservation is released.
+        return chatClient.prompt()
+                .user("Summarize: " + order)
+                .call()
+                .content();
+    }
+}
+```
+
+No code changes to your call sites. The advisor is auto-attached to every `ChatClient` built from the auto-configured `ChatClient.Builder` via a `ChatClientCustomizer` bean.
+
+## How it works
+
+| Step | Cycles wire call | Spring AI insertion point |
+|---|---|---|
+| Pre-call | `POST /v1/reservations` with subject + action + estimate | `CallAdvisor.adviseCall(...)` runs at `HIGHEST_PRECEDENCE + 100` |
+| Call | (advisor delegates to `chain.nextCall(request)`) | Spring AI continues advisor chain → provider call |
+| Commit on success | `POST /v1/reservations/{id}/commit` with actual amount | After `chain.nextCall` returns |
+| Release on error | `POST /v1/reservations/{id}/release` with reason | Catch block re-throws original after release |
+
+The advisor is registered automatically via Spring AI's `ChatClientCustomizer` mechanism — `ChatClientAutoConfiguration` discovers customizer beans and applies them to the builder. **Simply exposing a `CallAdvisor` bean is not enough** in Spring AI 1.0+ — the customizer is the supported wiring path.
 
 ## Compatibility
 
 - **Java**: 21+
-- **Spring Boot**: 3.5.x line (matches the existing Cycles Java SDK posture)
-- **Spring AI**: 1.0.x line (will track 1.1.x and beyond once the API matures; pinning rationale recorded in [AUDIT.md](./AUDIT.md))
+- **Spring Boot**: 3.5.x
+- **Spring AI**: 1.0.x (1.1.x compatible pending verification)
+
+## Known limitations (v0.1.0)
+
+These are *deliberate* deferrals to v0.2, not accidents:
+
+- **Streaming calls are not covered.** This advisor implements `CallAdvisor` only. Streaming invocations (`chatClient.prompt(...).stream()`) use Spring AI's separate `StreamAdvisor` plumbing and bypass Cycles entirely. A `CyclesBudgetStreamAdvisor` lands in v0.2.
+- **Estimate is a fixed constant.** Every call reserves `cycles.spring-ai.default-estimate` units. v0.2 will derive a per-call estimate from prompt token count + model pricing.
+- **Commit uses estimate as actual.** Token-usage extraction from `ChatResponse` varies by provider and is not portable across all Spring AI model adapters in v0.1.0. The commit therefore records the estimate as actual usage. v0.2 will read `ChatResponse.getMetadata().getUsage()` for real token counts.
+- **No `ToolCallback` decoration.** Action-authority gates on tool calls land in v0.2 (per the Spring AI integration plan).
+- **No `ObservationConvention`.** Audit-trail attribution beyond the reservation lifecycle lands in v0.2.
+
+## Configuration reference
+
+| Property | Default | Description |
+|---|---|---|
+| `cycles.spring-ai.enabled` | `true` | Master switch. Set false to disable Cycles wiring entirely. |
+| `cycles.spring-ai.default-estimate` | `1000` | Per-call estimate value (until v0.2 derives it from prompt size). |
+| `cycles.spring-ai.estimate-unit` | `USD_MICROCENTS` | Unit for the estimate. Cycles `Unit` enum values: `USD_MICROCENTS`, `TOKENS`, `CREDITS`, `RISK_POINTS`. |
+| `cycles.spring-ai.action-kind` | `llm.chat` | Action.kind label reported to Cycles. |
+| `cycles.spring-ai.action-name` | `spring-ai-chat` | Action.name label reported to Cycles. |
+| `cycles.spring-ai.fail-open` | `false` | When true, transport errors against Cycles are logged and the LLM call proceeds. Budget denials are always surfaced. |
+
+Connection + subject properties (`cycles.base-url`, `cycles.api-key`, `cycles.tenant`, etc.) come from [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) — see that repo's README for the full list.
+
+## Relationship to cycles-spring-boot-starter
+
+| If your app uses... | Depend on |
+|---|---|
+| Spring AI (`ChatClient`-based) | **`cycles-spring-ai-starter`** (this repo) |
+| Generic Spring Boot AOP with `@Cycles` annotation + SpEL | [`cycles-spring-boot-starter`](https://github.com/runcycles/cycles-spring-boot-starter) (`io.runcycles:cycles-client-java-spring`) |
+| Both | Depend on both — they wire on different conditions and don't conflict. This starter depends on the other internally for the HTTP client. |
 
 ## Project layout
 
@@ -81,6 +131,7 @@ cycles-spring-ai-starter/
 
 ```bash
 mvn -B verify --file cycles-spring-ai-starter/pom.xml
+mvn -B install --file cycles-spring-ai-starter/pom.xml -DskipTests
 mvn -B verify --file cycles-spring-ai-demo/pom.xml
 ```
 

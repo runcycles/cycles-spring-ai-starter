@@ -5,7 +5,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 /**
  * Configuration properties for the Cycles Spring AI integration.
  *
- * <p>Keys are bound under {@code cycles.spring-ai.*}.
+ * <p>Keys are bound under {@code cycles.spring-ai.*}. Connection settings
+ * ({@code cycles.base-url}, {@code cycles.api-key}) and subject defaults
+ * ({@code cycles.tenant}, {@code cycles.workspace}, {@code cycles.app}) are bound by
+ * the underlying {@code cycles-client-java-spring} starter and are not duplicated here.
  */
 @ConfigurationProperties(prefix = "cycles.spring-ai")
 public class CyclesSpringAiProperties {
@@ -17,19 +20,40 @@ public class CyclesSpringAiProperties {
     private boolean enabled = true;
 
     /**
-     * The Cycles budget identifier this application's calls are charged against.
-     * Required when {@link #enabled} is true.
+     * Default estimated cost per ChatClient invocation, in the unit configured by
+     * {@link #estimateUnit}. Used when a more specific per-call estimate is not
+     * available. Default: 1000.
+     *
+     * <p>v0.2 will derive a per-call estimate from prompt token counts; until then,
+     * this constant is used for every call.
      */
-    private String budgetId;
+    private long defaultEstimate = 1000L;
 
     /**
-     * Cycles server URL.
+     * Unit of measurement for {@link #defaultEstimate}. Must match a Cycles
+     * {@code Unit} enum value (USD_MICROCENTS, TOKENS, CREDITS, RISK_POINTS).
+     * Default: {@code USD_MICROCENTS}.
      */
-    private String serverUrl = "http://localhost:8080";
+    private String estimateUnit = "USD_MICROCENTS";
 
     /**
-     * When true, advisor errors (e.g., Cycles server unreachable) are logged and the call
-     * proceeds. When false, the advisor surfaces the error to the caller.
+     * Action kind reported to Cycles for ChatClient invocations.
+     * Default: {@code llm.chat}.
+     */
+    private String actionKind = "llm.chat";
+
+    /**
+     * Action name reported to Cycles for ChatClient invocations.
+     * Default: {@code spring-ai-chat}.
+     */
+    private String actionName = "spring-ai-chat";
+
+    /**
+     * When true, advisor errors (e.g. Cycles server unreachable) are logged and the
+     * call proceeds. When false, the advisor surfaces the error to the caller.
+     * Budget denials ({@link io.runcycles.client.java.springai.CyclesBudgetDeniedException})
+     * are always surfaced regardless of this setting — fail-open only applies to
+     * transport / unexpected errors, not to deliberate denials.
      */
     private boolean failOpen = false;
 
@@ -53,42 +77,70 @@ public class CyclesSpringAiProperties {
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
     /**
-     * Returns the Cycles budget identifier, or null when unset.
+     * Returns the default per-call estimate.
      *
-     * @return the budget id.
+     * @return the default estimate.
      */
-    public String getBudgetId() { return budgetId; }
+    public long getDefaultEstimate() { return defaultEstimate; }
 
     /**
-     * Sets the Cycles budget identifier to charge calls against.
+     * Sets the default per-call estimate.
      *
-     * @param budgetId the budget id.
+     * @param defaultEstimate non-negative estimate value.
      */
-    public void setBudgetId(String budgetId) { this.budgetId = budgetId; }
+    public void setDefaultEstimate(long defaultEstimate) { this.defaultEstimate = defaultEstimate; }
 
     /**
-     * Returns the Cycles server URL.
+     * Returns the estimate unit name.
      *
-     * @return the server URL.
+     * @return the unit name.
      */
-    public String getServerUrl() { return serverUrl; }
+    public String getEstimateUnit() { return estimateUnit; }
 
     /**
-     * Sets the Cycles server URL this application talks to.
+     * Sets the estimate unit.
      *
-     * @param serverUrl the server URL.
+     * @param estimateUnit a Cycles {@code Unit} enum name.
      */
-    public void setServerUrl(String serverUrl) { this.serverUrl = serverUrl; }
+    public void setEstimateUnit(String estimateUnit) { this.estimateUnit = estimateUnit; }
 
     /**
-     * Returns whether advisor errors are tolerated (log + proceed) or surfaced.
+     * Returns the action kind label.
      *
-     * @return true to fail open.
+     * @return the action kind.
+     */
+    public String getActionKind() { return actionKind; }
+
+    /**
+     * Sets the action kind label.
+     *
+     * @param actionKind the action kind.
+     */
+    public void setActionKind(String actionKind) { this.actionKind = actionKind; }
+
+    /**
+     * Returns the action name label.
+     *
+     * @return the action name.
+     */
+    public String getActionName() { return actionName; }
+
+    /**
+     * Sets the action name label.
+     *
+     * @param actionName the action name.
+     */
+    public void setActionName(String actionName) { this.actionName = actionName; }
+
+    /**
+     * Returns whether transport-level advisor errors are tolerated.
+     *
+     * @return true to fail open on transport errors.
      */
     public boolean isFailOpen() { return failOpen; }
 
     /**
-     * Sets the fail-open behavior on Cycles errors.
+     * Sets the fail-open behavior on transport/unexpected errors.
      *
      * @param failOpen true to log and proceed, false to surface the error.
      */

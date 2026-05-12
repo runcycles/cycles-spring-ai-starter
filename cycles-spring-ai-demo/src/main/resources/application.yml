@@ -6,9 +6,23 @@ spring:
       # Set OPENAI_API_KEY in your env, or override here for local testing.
       api-key: ${OPENAI_API_KEY:demo-key-not-set}
 
+# Required by the underlying cycles-client-java-spring SDK so its auto-configuration
+# can construct a CyclesClient. The demo defaults to a local Cycles server and a
+# placeholder API key; override via environment for real runs.
 cycles:
-  spring-ai:
-    enabled: true
-    budget-id: demo-budget
-    server-url: http://localhost:8080
-    fail-open: true   # local demo: tolerate Cycles server being absent
+  base-url: ${CYCLES_BASE_URL:http://localhost:7878}
+  api-key:  ${CYCLES_API_KEY:demo-api-key-not-set}
+  # Subject defaults applied to every Cycles call from this app.
+  tenant:    demo-tenant
+  workspace: demo
+  app:       cycles-spring-ai-demo
+
+# Spring AI starter properties (this repo).
+cycles.spring-ai:
+  enabled: true
+  default-estimate: 1000
+  estimate-unit: USD_MICROCENTS
+  action-kind: llm.chat
+  action-name: spring-ai-demo
+  # Local demo: tolerate Cycles server being absent so context boots cleanly.
+  fail-open: true
