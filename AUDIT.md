@@ -129,8 +129,8 @@ The entire pipeline is wrapped in `Flux.defer(...)`, so all of the steps below e
 
 ## Change log
 
-### 0.3.0-SNAPSHOT (in progress)
-See [CHANGELOG.md](./CHANGELOG.md) `[Unreleased]` section for the full entry. Surface deltas vs 0.2.0 are captured in the "added in 0.3.0-SNAPSHOT" sub-tables above. New extension points (`SubjectResolver`, `PromptTokenEstimator`) and the `cycles.reservation_id` trace correlation tag; no breaking changes to v0.2.0 callers.
+### 0.3.0 — 2026-05-12
+See [CHANGELOG.md](./CHANGELOG.md) for the full entry. Surface deltas vs 0.2.0 are captured in the "added in 0.3.0-SNAPSHOT" sub-tables above (sub-table headers preserve the SNAPSHOT wording for historical context — what landed in which dev cycle; the released version is 0.3.0). New extension points (`SubjectResolver`, `PromptTokenEstimator`) and the `cycles.reservation_id` trace correlation tag; no breaking changes to v0.2.0 callers.
 
 ### 0.2.0 — 2026-05-12
 See [CHANGELOG.md](./CHANGELOG.md) for the full entry. Surface deltas vs v0.1.0 are captured in the "added in 0.2.0-SNAPSHOT" sub-tables above (the sub-table headers preserve "0.2.0-SNAPSHOT" wording so historical context — what landed in which dev cycle — stays readable; the released version is 0.2.0).
