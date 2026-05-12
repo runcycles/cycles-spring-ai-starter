@@ -19,6 +19,9 @@ import org.springframework.ai.chat.client.ChatClientRequest;
 import org.springframework.ai.chat.client.ChatClientResponse;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisor;
 import org.springframework.ai.chat.client.advisor.api.CallAdvisorChain;
+import org.springframework.ai.chat.metadata.ChatResponseMetadata;
+import org.springframework.ai.chat.metadata.Usage;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.core.Ordered;
 
 import java.util.Map;
@@ -112,7 +115,7 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
         }
 
         if (reservationId != null) {
-            commitOrFailOpen(reservationId);
+            commitOrFailOpen(reservationId, response);
         }
         return response;
     }
@@ -181,14 +184,14 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
                 "Cycles reservation HTTP failure status=" + response.getStatus());
     }
 
-    private void commitOrFailOpen(String reservationId) {
+    private void commitOrFailOpen(String reservationId, ChatClientResponse chatResponse) {
         CommitRequest commit = CommitRequest.builder()
                 .idempotencyKey(UUID.randomUUID().toString())
-                .actual(buildEstimateAmount())
+                .actual(buildActualAmount(chatResponse))
                 .build();
-        CyclesResponse<Map<String, Object>> response;
+        CyclesResponse<Map<String, Object>> commitResponse;
         try {
-            response = cyclesClient.commitReservation(reservationId, commit);
+            commitResponse = cyclesClient.commitReservation(reservationId, commit);
         } catch (RuntimeException transportFailure) {
             if (springAiProperties.isFailOpen()) {
                 log.warn("Cycles commit transport failure (fail-open=true; ignoring): {}",
@@ -199,15 +202,15 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
                     "Cycles commit failed for reservation " + reservationId + " (fail-open=false)",
                     transportFailure);
         }
-        if (!response.is2xx()) {
+        if (!commitResponse.is2xx()) {
             if (springAiProperties.isFailOpen()) {
                 log.warn("Cycles commit HTTP failure status={} for reservation {} "
                                 + "(fail-open=true; ignoring): body={}",
-                        response.getStatus(), reservationId, response.getBody());
+                        commitResponse.getStatus(), reservationId, commitResponse.getBody());
                 return;
             }
             throw new IllegalStateException(
-                    "Cycles commit HTTP failure status=" + response.getStatus()
+                    "Cycles commit HTTP failure status=" + commitResponse.getStatus()
                             + " for reservation " + reservationId);
         }
     }
@@ -259,5 +262,67 @@ public class CyclesBudgetAdvisor implements CallAdvisor {
             unit = Unit.USD_MICROCENTS;
         }
         return new Amount(unit, springAiProperties.getDefaultEstimate());
+    }
+
+    /**
+     * Compute the actual amount to commit from the chat response's token usage,
+     * falling back to the estimate when usage data or rates aren't available.
+     *
+     * <p>Three modes, in priority order:
+     * <ol>
+     *   <li>{@code estimate-unit=TOKENS}: commit total tokens directly (no rate config needed).</li>
+     *   <li>{@code input-cost-per-token} or {@code output-cost-per-token} configured and usage
+     *       present: commit {@code (promptTokens * inputCost) + (completionTokens * outputCost)}.</li>
+     *   <li>Otherwise: commit the estimate as actual (v0.1.0-compatible fallback).</li>
+     * </ol>
+     *
+     * <p>Usage extraction tolerates null at every step — providers occasionally omit usage
+     * data in non-OpenAI-shaped responses, and we don't want to throw at commit time.
+     */
+    private Amount buildActualAmount(ChatClientResponse response) {
+        Unit unit = Unit.fromString(springAiProperties.getEstimateUnit());
+        if (unit == null) {
+            unit = Unit.USD_MICROCENTS;
+        }
+
+        Usage usage = extractUsage(response);
+
+        if (unit == Unit.TOKENS && usage != null && usage.getTotalTokens() != null) {
+            return new Amount(unit, usage.getTotalTokens().longValue());
+        }
+
+        long inputRate = springAiProperties.getInputCostPerToken();
+        long outputRate = springAiProperties.getOutputCostPerToken();
+        if (usage != null && (inputRate > 0 || outputRate > 0)) {
+            long actual = (nullSafeLong(usage.getPromptTokens()) * inputRate)
+                        + (nullSafeLong(usage.getCompletionTokens()) * outputRate);
+            return new Amount(unit, actual);
+        }
+
+        // Fallback: commit estimate as actual (v0.1.0 behavior).
+        return buildEstimateAmount();
+    }
+
+    /**
+     * Defensively pull {@code Usage} out of a possibly-incomplete ChatClientResponse.
+     * Caller must pass a non-null response (only invoked from {@code buildActualAmount},
+     * which is reached only after {@code chain.nextCall} returned successfully).
+     *
+     * @return the usage or null when any intermediate step is null.
+     */
+    private static Usage extractUsage(ChatClientResponse response) {
+        ChatResponse chatResponse = response.chatResponse();
+        if (chatResponse == null) {
+            return null;
+        }
+        ChatResponseMetadata metadata = chatResponse.getMetadata();
+        if (metadata == null) {
+            return null;
+        }
+        return metadata.getUsage();
+    }
+
+    private static long nullSafeLong(Integer value) {
+        return value == null ? 0L : value.longValue();
     }
 }

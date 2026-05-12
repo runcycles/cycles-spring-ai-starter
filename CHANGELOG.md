@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — 0.2.0-SNAPSHOT
 
-Development branch. See "Known limitations (v0.1.0)" in [README.md](./README.md) for v0.2 candidates (`StreamAdvisor`, real `ChatResponse.Usage` extraction, per-call estimate derivation, `ToolCallback` decoration, `ObservationConvention`).
+### Added
+- **Real `ChatResponse.Usage` extraction on commit.** `CyclesBudgetAdvisor` now reads token usage from the chat response after a successful call and commits the actual cost instead of the pre-call estimate. Three modes:
+  - `estimate-unit=TOKENS`: commits total tokens from `Usage.getTotalTokens()`.
+  - `input-cost-per-token` and/or `output-cost-per-token` configured: commits `(promptTokens × inputRate) + (completionTokens × outputRate)`.
+  - Otherwise: continues to commit the estimate as actual (v0.1.0-compatible fallback).
+- Two new configuration properties:
+  - `cycles.spring-ai.input-cost-per-token` (long, default 0) — per-input-token cost in the configured estimate unit.
+  - `cycles.spring-ai.output-cost-per-token` (long, default 0) — per-output-token cost.
+- Both new properties reject negative values at config-binding time (same pattern as `default-estimate`).
+
+### Still pending for v0.2
+- Streaming chat (`StreamAdvisor`) — non-streaming calls only so far.
+- Per-call estimate derivation from prompt token count — estimate is still a fixed constant.
+- `ToolCallback` decoration (tool-level authority gates).
+- `ObservationConvention` (richer audit-trail attribution).
 
 ## [0.1.0] — 2026-05-12
 

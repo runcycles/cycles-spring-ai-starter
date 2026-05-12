@@ -88,15 +88,18 @@ The advisor is registered automatically via Spring AI's `ChatClientCustomizer` m
 - **Spring Boot**: 3.5.x
 - **Spring AI**: 1.0.x (BOM-managed; tested compatible with 1.1.x via the post-scaffold Dependabot bump to 1.1.6)
 
-## Known limitations (v0.1.0)
+## Known limitations
 
-These are *deliberate* deferrals to v0.2, not accidents:
+These are *deliberate* deferrals to a future release, not accidents:
 
-- **Streaming calls are not covered.** This advisor implements `CallAdvisor` only. Streaming invocations (`chatClient.prompt(...).stream()`) use Spring AI's separate `StreamAdvisor` plumbing and bypass Cycles entirely. A `CyclesBudgetStreamAdvisor` lands in v0.2.
-- **Estimate is a fixed constant.** Every call reserves `cycles.spring-ai.default-estimate` units. v0.2 will derive a per-call estimate from prompt token count + model pricing.
-- **Commit uses estimate as actual.** Token-usage extraction from `ChatResponse` varies by provider and is not portable across all Spring AI model adapters in v0.1.0. The commit therefore records the estimate as actual usage. v0.2 will read `ChatResponse.getMetadata().getUsage()` for real token counts.
-- **No `ToolCallback` decoration.** Action-authority gates on tool calls land in v0.2 (per the Spring AI integration plan).
-- **No `ObservationConvention`.** Audit-trail attribution beyond the reservation lifecycle lands in v0.2.
+- **Streaming calls are not covered.** This advisor implements `CallAdvisor` only. Streaming invocations (`chatClient.prompt(...).stream()`) use Spring AI's separate `StreamAdvisor` plumbing and bypass Cycles entirely. A `CyclesBudgetStreamAdvisor` is in the v0.2 roadmap.
+- **Estimate is a fixed constant.** Every call reserves `cycles.spring-ai.default-estimate` units. A future release will derive a per-call estimate from prompt token count + model pricing.
+- **No `ToolCallback` decoration.** Action-authority gates on tool calls are in the v0.2 roadmap.
+- **No `ObservationConvention`.** Richer audit-trail attribution beyond the reservation lifecycle is in the v0.2 roadmap.
+
+### Already addressed in `0.2.0-SNAPSHOT` (post-v0.1.0)
+
+- ✅ **Real `ChatResponse.Usage` extraction on commit** — when the LLM provider returns usage and either `input-cost-per-token` / `output-cost-per-token` are configured (or `estimate-unit=TOKENS`), the advisor commits the actual cost computed from tokens rather than the estimate. Falls back to estimate-as-actual when usage data is missing.
 
 ## Configuration reference
 
@@ -108,6 +111,8 @@ These are *deliberate* deferrals to v0.2, not accidents:
 | `cycles.spring-ai.action-kind` | `llm.chat` | Action.kind label reported to Cycles. |
 | `cycles.spring-ai.action-name` | `spring-ai-chat` | Action.name label reported to Cycles. |
 | `cycles.spring-ai.fail-open` | `false` | When true, transport errors against Cycles are logged and the LLM call proceeds. Budget denials are always surfaced. |
+| `cycles.spring-ai.input-cost-per-token` | `0` | Per-input-token cost in the estimate unit. When set (with `output-cost-per-token`), the advisor commits actual token-based cost instead of the estimate. Example: 25 (= $2.50/1M tokens for OpenAI gpt-4o input). |
+| `cycles.spring-ai.output-cost-per-token` | `0` | Per-output-token cost. Example: 100 (= $10.00/1M tokens for OpenAI gpt-4o output). |
 
 Connection + subject properties (`cycles.base-url`, `cycles.api-key`, `cycles.tenant`, etc.) come from [`cycles-client-java-spring`](https://github.com/runcycles/cycles-spring-boot-starter) — see that repo's README for the full list.
 

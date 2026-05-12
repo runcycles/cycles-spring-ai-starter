@@ -30,6 +30,8 @@ The Spring AI starter does not own its own protocol — it delegates to the Cycl
 | `cycles.spring-ai.action-kind` | string | `llm.chat` | Action.kind label reported to Cycles. |
 | `cycles.spring-ai.action-name` | string | `spring-ai-chat` | Action.name label reported to Cycles. |
 | `cycles.spring-ai.fail-open` | boolean | `false` | When `true`, transport / unexpected errors are logged and the call proceeds. Budget denials (`DENY` decision) are always surfaced regardless. |
+| `cycles.spring-ai.input-cost-per-token` | long | `0` | **Added in 0.2.0-SNAPSHOT.** Per-input-token cost in the configured estimate unit. When > 0 (or `output-cost-per-token` > 0), enables real-token-based actual accounting at commit time. Rejected as IllegalArgumentException at binding when negative. |
+| `cycles.spring-ai.output-cost-per-token` | long | `0` | **Added in 0.2.0-SNAPSHOT.** Per-output-token cost in the configured estimate unit. Same validation as the input rate. |
 
 ## Auto-configuration conditions
 
@@ -55,7 +57,10 @@ For each `chatClient.prompt(...).call()`:
 1. `POST /v1/reservations` — body includes subject (tenant/workspace/app/workflow/agent/toolset from `CyclesProperties`), action (kind/name from `CyclesSpringAiProperties`), estimate (default-estimate × estimate-unit), idempotency_key (per-call UUID).
 2. If decision is `DENY` → `CyclesBudgetDeniedException` thrown, no LLM call.
 3. If decision is `ALLOW`/`ALLOW_WITH_CAPS` → `chain.nextCall(request)` proceeds.
-4. On success → `POST /v1/reservations/{id}/commit` with actual = estimate (until v0.2 reads real Usage).
+4. On success → `POST /v1/reservations/{id}/commit` with actual computed from response usage:
+   - `estimate-unit=TOKENS` + usage present → actual = `usage.getTotalTokens()`.
+   - `input-cost-per-token` and/or `output-cost-per-token` set + usage present → actual = `(promptTokens × inputRate) + (completionTokens × outputRate)`.
+   - Otherwise → actual = estimate (v0.1.0-compatible fallback).
 5. On exception → `POST /v1/reservations/{id}/release` with reason = `chat-call-failed: <ExceptionClass>`, then the original exception is re-thrown.
 
 ## Change log

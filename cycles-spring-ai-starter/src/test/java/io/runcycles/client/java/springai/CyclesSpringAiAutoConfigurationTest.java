@@ -7,11 +7,14 @@ import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiAutoConfigu
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.ChatClientCustomizer;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 /**
  * Smoke tests for the Cycles Spring AI auto-configuration.
@@ -97,6 +100,22 @@ class CyclesSpringAiAutoConfigurationTest {
     }
 
     @Test
+    void customizerAttachesAdvisorToChatClientBuilder() {
+        // Exercise the lambda body of cyclesChatClientCustomizer — verify it actually
+        // calls builder.defaultAdvisors(advisor). Without this test the lambda is
+        // registered as a bean but never invoked, leaving its body uncovered.
+        contextRunner.run(ctx -> {
+            ChatClientCustomizer customizer = ctx.getBean("cyclesChatClientCustomizer", ChatClientCustomizer.class);
+            CyclesBudgetAdvisor advisor = ctx.getBean(CyclesBudgetAdvisor.class);
+            ChatClient.Builder builder = mock(ChatClient.Builder.class);
+
+            customizer.customize(builder);
+
+            verify(builder).defaultAdvisors(advisor);
+        });
+    }
+
+    @Test
     void userProvidedAdvisorOverridesAutoConfigured() {
         // App supplies its own CyclesBudgetAdvisor (e.g. subclassed for custom subject
         // resolution). Auto-config must back off — exactly ONE advisor in the context,
@@ -109,6 +128,46 @@ class CyclesSpringAiAutoConfigurationTest {
                     assertThat(ctx.getBean(CyclesBudgetAdvisor.class)).isSameAs(userAdvisor);
                     // Customizer still wires (it depends on the now-user-supplied advisor).
                     assertThat(ctx).hasBean("cyclesChatClientCustomizer");
+                });
+    }
+
+    @Test
+    void rejectsNegativeInputCostPerTokenAtBindingTime() {
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.input-cost-per-token=-1")
+                .run(ctx -> {
+                    assertThat(ctx).hasFailed();
+                    assertThat(ctx.getStartupFailure())
+                            .rootCause()
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessageContaining("input-cost-per-token must be non-negative");
+                });
+    }
+
+    @Test
+    void rejectsNegativeOutputCostPerTokenAtBindingTime() {
+        contextRunner
+                .withPropertyValues("cycles.spring-ai.output-cost-per-token=-5")
+                .run(ctx -> {
+                    assertThat(ctx).hasFailed();
+                    assertThat(ctx.getStartupFailure())
+                            .rootCause()
+                            .isInstanceOf(IllegalArgumentException.class)
+                            .hasMessageContaining("output-cost-per-token must be non-negative");
+                });
+    }
+
+    @Test
+    void bindsCostPerTokenProperties() {
+        contextRunner
+                .withPropertyValues(
+                        "cycles.spring-ai.input-cost-per-token=25",
+                        "cycles.spring-ai.output-cost-per-token=100"
+                )
+                .run(ctx -> {
+                    CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
+                    assertThat(props.getInputCostPerToken()).isEqualTo(25L);
+                    assertThat(props.getOutputCostPerToken()).isEqualTo(100L);
                 });
     }
 

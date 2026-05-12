@@ -21,11 +21,13 @@ public class CyclesSpringAiProperties {
 
     /**
      * Default estimated cost per ChatClient invocation, in the unit configured by
-     * {@link #estimateUnit}. Used when a more specific per-call estimate is not
-     * available. Default: 1000.
+     * {@link #estimateUnit}. Used as the pre-call reservation amount.
      *
-     * <p>v0.2 will derive a per-call estimate from prompt token counts; until then,
-     * this constant is used for every call.
+     * <p>v0.2 derives the actual committed amount from {@code ChatResponse.Usage}
+     * when {@link #inputCostPerToken} / {@link #outputCostPerToken} (or unit=TOKENS)
+     * provide a token-to-cost mapping; otherwise the estimate is committed as actual.
+     * A future release will additionally derive the pre-call estimate from prompt
+     * token count.
      */
     private long defaultEstimate = 1000L;
 
@@ -56,6 +58,35 @@ public class CyclesSpringAiProperties {
      * transport / unexpected errors, not to deliberate denials.
      */
     private boolean failOpen = false;
+
+    /**
+     * Per-token cost for input (prompt) tokens, in the unit configured by
+     * {@link #estimateUnit}. Used to compute the actual amount at commit time
+     * from the {@code ChatResponse.Usage} returned by the LLM provider.
+     *
+     * <p>Default {@code 0} preserves the v0.1.0 behavior of committing the estimate
+     * as actual. Set this (and {@link #outputCostPerToken}) to opt into real
+     * token-based actual accounting. Ignored when the response has no usage data
+     * (the advisor falls back to estimate-as-actual in that case).
+     *
+     * <p>Example: OpenAI gpt-4o input pricing is roughly $2.50 / 1M tokens =
+     * 25 USD_MICROCENTS per input token, so {@code input-cost-per-token: 25}.
+     */
+    private long inputCostPerToken = 0L;
+
+    /**
+     * Per-token cost for output (completion) tokens, in the unit configured by
+     * {@link #estimateUnit}. Used to compute the actual amount at commit time
+     * from the {@code ChatResponse.Usage} returned by the LLM provider.
+     *
+     * <p>Default {@code 0} preserves the v0.1.0 behavior of committing the estimate
+     * as actual. Set this (and {@link #inputCostPerToken}) to opt into real
+     * token-based actual accounting.
+     *
+     * <p>Example: OpenAI gpt-4o output pricing is roughly $10.00 / 1M tokens =
+     * 100 USD_MICROCENTS per output token, so {@code output-cost-per-token: 100}.
+     */
+    private long outputCostPerToken = 0L;
 
     /** Default constructor for Spring property binding. */
     public CyclesSpringAiProperties() {
@@ -157,4 +188,46 @@ public class CyclesSpringAiProperties {
      * @param failOpen true to log and proceed, false to surface the error.
      */
     public void setFailOpen(boolean failOpen) { this.failOpen = failOpen; }
+
+    /**
+     * Returns the input (prompt) token cost rate.
+     *
+     * @return the cost per input token in the configured estimate unit.
+     */
+    public long getInputCostPerToken() { return inputCostPerToken; }
+
+    /**
+     * Sets the input token cost rate. Must be non-negative.
+     *
+     * @param inputCostPerToken non-negative cost per input token.
+     * @throws IllegalArgumentException when negative.
+     */
+    public void setInputCostPerToken(long inputCostPerToken) {
+        if (inputCostPerToken < 0) {
+            throw new IllegalArgumentException(
+                    "cycles.spring-ai.input-cost-per-token must be non-negative, got: " + inputCostPerToken);
+        }
+        this.inputCostPerToken = inputCostPerToken;
+    }
+
+    /**
+     * Returns the output (completion) token cost rate.
+     *
+     * @return the cost per output token in the configured estimate unit.
+     */
+    public long getOutputCostPerToken() { return outputCostPerToken; }
+
+    /**
+     * Sets the output token cost rate. Must be non-negative.
+     *
+     * @param outputCostPerToken non-negative cost per output token.
+     * @throws IllegalArgumentException when negative.
+     */
+    public void setOutputCostPerToken(long outputCostPerToken) {
+        if (outputCostPerToken < 0) {
+            throw new IllegalArgumentException(
+                    "cycles.spring-ai.output-cost-per-token must be non-negative, got: " + outputCostPerToken);
+        }
+        this.outputCostPerToken = outputCostPerToken;
+    }
 }
