@@ -16,7 +16,7 @@ Per-call lifecycle: **reserve → call → commit** on success, **reserve → ca
 <dependency>
     <groupId>io.runcycles</groupId>
     <artifactId>cycles-spring-ai-starter</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
 </dependency>
 ```
 

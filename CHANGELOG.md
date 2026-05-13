@@ -5,6 +5,28 @@ All notable changes to `cycles-spring-ai-starter` will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-05-12
+
+Documentation-only patch release. No code changes. v0.3.1 == v0.3.0 functionally; cut to ship the corrected javadoc + README config-reference examples on Maven Central.
+
+### Fixed
+
+- **`cycles-spring-ai-starter` per-token cost examples were off by 10x.** The `CyclesSpringAiProperties` javadoc for `inputCostPerToken` / `outputCostPerToken` and the README's configuration-reference table both stated:
+  - `OpenAI gpt-4o input $2.50/1M tokens = 25 USD_MICROCENTS per token`
+  - `OpenAI gpt-4o output $10.00/1M tokens = 100 USD_MICROCENTS per token`
+  - `Unit.java` (the canonical SDK definition) says `1 USD = 100,000,000 microcents`, so the correct values are **`250`** and **`1000`** respectively. The previous examples appear to have been written assuming `1 microcent = 1e-7 USD` rather than the actual `1e-8 USD`.
+  - Impact on 0.3.0 users: anyone copying the example into their `application.yml` set `input-cost-per-token: 25` and the advisor committed token-based actuals **10x lower than the real provider cost**. Budgets blew through silently because the audit accounting under-reported by an order of magnitude.
+- Updated javadoc on both properties + the YAML example in `tokenEstimatorEncoding`'s javadoc + the README config-reference table to use `250` / `1000` and to spell out the conversion (`1 USD = 100,000,000 USD_MICROCENTS`) so future readers don't have to re-derive it.
+- Test comment `commitUsesComputedCostWhenRatesAndUsagePresent` previously labeled its arbitrary small rates as "OpenAI gpt-4o-style"; rewrote the comment to be explicit that the rates are arbitrary for arithmetic readability (real gpt-4o is 250 / 1000).
+
+### Why a patch release for a docs-only change
+
+The wrong numbers shipped inside the 0.3.0 source/javadoc jars on Maven Central. Anyone reading the javadoc from their IDE or from search.maven.org gets the wrong example. A patch release is the only way to fix that surface. Users on 0.3.0 who copied the wrong example numbers and noticed audit/budget undercounting: upgrade to 0.3.1 and bump your `input-cost-per-token` / `output-cost-per-token` values by 10x.
+
+### Verification
+
+`mvn -B clean verify` → BUILD SUCCESS, 152 tests, jacoco 100% / 100%. `mvn -B javadoc:jar` → zero warnings.
+
 ## [0.3.0] — 2026-05-12
 
 Three new extension points and a trace-correlation tag. Nothing in 0.3.0 breaks v0.2.0 callers — the new behaviors are off by default or controlled by `@ConditionalOnMissingBean` beans that supplement (not replace) v0.2.0 defaults.

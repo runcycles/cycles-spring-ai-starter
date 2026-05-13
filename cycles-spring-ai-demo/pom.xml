@@ -19,7 +19,7 @@
              reads the same ${revision} so its dependency on the starter (below) and
              its own <version> bump in lockstep with the starter. Keep this default
              aligned with .mvn/maven.config. -->
-        <revision>0.3.0</revision>
+        <revision>0.3.1</revision>
 
         <java.version>21</java.version>
         <maven.compiler.source>21</maven.compiler.source>
