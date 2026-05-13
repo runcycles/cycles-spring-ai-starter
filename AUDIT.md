@@ -129,6 +129,9 @@ The entire pipeline is wrapped in `Flux.defer(...)`, so all of the steps below e
 
 ## Change log
 
+### 0.3.1 — 2026-05-12
+Documentation-only patch. No public-API or property-key changes vs 0.3.0. Cut to ship corrected `inputCostPerToken` / `outputCostPerToken` javadoc + README examples on Maven Central (the 0.3.0 shipped values were off by 10x — see [CHANGELOG.md](./CHANGELOG.md) `[0.3.1]` for the full explanation).
+
 ### 0.3.0 — 2026-05-12
 See [CHANGELOG.md](./CHANGELOG.md) for the full entry. Surface deltas vs 0.2.0 are captured in the "added in 0.3.0-SNAPSHOT" sub-tables above (sub-table headers preserve the SNAPSHOT wording for historical context — what landed in which dev cycle; the released version is 0.3.0). New extension points (`SubjectResolver`, `PromptTokenEstimator`) and the `cycles.reservation_id` trace correlation tag; no breaking changes to v0.2.0 callers.
 

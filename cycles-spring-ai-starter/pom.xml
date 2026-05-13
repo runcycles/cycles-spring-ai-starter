@@ -47,7 +47,7 @@
              Maven Central doesn't carry stale <revision> metadata (the flatten plugin's
              resolveCiFriendliesOnly mode resolves <version> but preserves the
              <properties> block as-is). -->
-        <revision>0.3.0</revision>
+        <revision>0.3.1</revision>
 
         <java.version>21</java.version>
         <maven.compiler.source>21</maven.compiler.source>
