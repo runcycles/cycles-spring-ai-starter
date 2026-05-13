@@ -224,8 +224,8 @@ Default is `CharsPerTokenEstimator` (the v0.2.0 `chars / 4` heuristic). For tigh
 cycles:
   spring-ai:
     estimate-from-prompt: true
-    input-cost-per-token: 25
-    output-cost-per-token: 100
+    input-cost-per-token: 250                  # gpt-4o: $2.50/1M tokens × 100M microcents/USD = 250
+    output-cost-per-token: 1000                # gpt-4o: $10.00/1M tokens = 1000 microcents/token
     token-estimator-encoding: cl100k_base   # or o200k_base for gpt-4o family
 ```
 
