@@ -27,10 +27,22 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring.boot.version>3.5.14</spring.boot.version>
         <spring.ai.version>1.1.6</spring.ai.version>
+        <!-- Mirrors the starter pom's Netty override. See the canonical comment there for
+             the full GHSA list and why the netty-bom must be imported (Spring Boot's BOM
+             bakes literal Netty versions, so the property alone is a no-op). -->
+        <netty.version>4.1.133.Final</netty.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!-- netty-bom before spring-boot-dependencies — first-import-wins. -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-dependencies</artifactId>
