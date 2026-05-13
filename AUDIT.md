@@ -129,6 +129,9 @@ The entire pipeline is wrapped in `Flux.defer(...)`, so all of the steps below e
 
 ## Change log
 
+### Unreleased — 2026-05-13
+Build-only patch — no public-API, property-key, or wire-protocol changes. Pinned transitive Netty to **4.1.133.Final** (was 4.1.132.Final, managed by `spring-boot-dependencies:3.5.14`) via a `netty-bom` import placed *before* `spring-boot-dependencies` in both `cycles-spring-ai-starter/pom.xml` and `cycles-spring-ai-demo/pom.xml`. Maven's first-import-wins rule applies because Spring Boot's published BOM bakes in literal Netty versions rather than the `${netty.version}` placeholder, so the property override alone is a no-op. Closes the batch of high/medium Netty CVEs flagged by OSSF Scorecard alert #7: GHSA-mj4r-2hfc-f8p6, GHSA-cm33-6792-r9fm, GHSA-38f8-5428-x5cv, GHSA-57rv-r2g8-2cj3, GHSA-f6hv-jmp6-3vwv, GHSA-m4cv-j2px-7723, GHSA-v8h7-rr48-vmmv, GHSA-xxqh-mfjm-7mv9, GHSA-45q3-82m4-75jr, GHSA-rwm7-x88c-3g2p (HTTP smuggling, HttpClientCodec desync, decompression-bomb DoS, DNS codec input validation, HttpProxyHandler header injection, epoll RST half-close DoS).
+
 ### 0.3.1 — 2026-05-12
 Documentation-only patch. No public-API or property-key changes vs 0.3.0. Cut to ship corrected `inputCostPerToken` / `outputCostPerToken` javadoc + README examples on Maven Central (the 0.3.0 shipped values were off by 10x — see [CHANGELOG.md](./CHANGELOG.md) `[0.3.1]` for the full explanation).
 

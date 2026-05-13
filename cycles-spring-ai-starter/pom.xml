@@ -57,12 +57,31 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <spring.boot.version>3.5.14</spring.boot.version>
         <spring.ai.version>1.1.6</spring.ai.version>
+        <!-- Patched Netty for the CVE batch reported by OSSF Scorecard: HTTP smuggling
+             (GHSA-38f8-5428-x5cv, GHSA-m4cv-j2px-7723, GHSA-v8h7-rr48-vmmv,
+             GHSA-xxqh-mfjm-7mv9), HttpClientCodec desync (GHSA-57rv-r2g8-2cj3),
+             decompression-bomb DoS (GHSA-f6hv-jmp6-3vwv), Lz4 resource exhaustion
+             (GHSA-mj4r-2hfc-f8p6), DNS codec input validation (GHSA-cm33-6792-r9fm),
+             HttpProxyHandler header injection (GHSA-45q3-82m4-75jr), epoll RST half-close
+             DoS (GHSA-rwm7-x88c-3g2p). 4.1.133.Final is the first patched 4.1.x release. -->
+        <netty.version>4.1.133.Final</netty.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
-            <!-- spring-boot-dependencies first so any explicit downstream pins win. Manages
-                 reactor-core / reactor-test versions (needed for the streaming advisor's tests). -->
+            <!-- Netty BOM imported BEFORE spring-boot-dependencies so its versions win.
+                 Maven's "first import wins" rule applies to BOM imports; Spring Boot's BOM
+                 bakes in literal Netty versions (the <netty.version> property in this pom
+                 is a placeholder for documentation / future Spring Boot versions that may
+                 honor it). Without this explicit BOM import the override above is a no-op
+                 and Scorecard would keep flagging the unpatched Netty CVEs. -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-dependencies</artifactId>
