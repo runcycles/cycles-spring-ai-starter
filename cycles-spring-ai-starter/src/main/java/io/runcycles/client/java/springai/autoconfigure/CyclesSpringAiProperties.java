@@ -86,8 +86,11 @@ public class CyclesSpringAiProperties {
      * token-based actual accounting. Ignored when the response has no usage data
      * (the advisor falls back to estimate-as-actual in that case).
      *
-     * <p>Example: OpenAI gpt-4o input pricing is roughly $2.50 / 1M tokens =
-     * 25 USD_MICROCENTS per input token, so {@code input-cost-per-token: 25}.
+     * <p>Example: OpenAI gpt-4o input pricing is roughly $2.50 / 1M tokens.
+     * USD_MICROCENTS is defined as 1 USD = 100,000,000 microcents (see
+     * {@code io.runcycles.client.java.spring.model.Unit}), so
+     * $2.50 / 1,000,000 tokens × 100,000,000 microcents/USD = 250 microcents
+     * per input token: {@code input-cost-per-token: 250}.
      */
     private long inputCostPerToken = 0L;
 
@@ -100,8 +103,10 @@ public class CyclesSpringAiProperties {
      * as actual. Set this (and {@link #inputCostPerToken}) to opt into real
      * token-based actual accounting.
      *
-     * <p>Example: OpenAI gpt-4o output pricing is roughly $10.00 / 1M tokens =
-     * 100 USD_MICROCENTS per output token, so {@code output-cost-per-token: 100}.
+     * <p>Example: OpenAI gpt-4o output pricing is roughly $10.00 / 1M tokens.
+     * Using the same USD_MICROCENTS conversion as {@link #inputCostPerToken}:
+     * $10.00 / 1,000,000 tokens × 100,000,000 microcents/USD = 1000 microcents
+     * per output token: {@code output-cost-per-token: 1000}.
      */
     private long outputCostPerToken = 0L;
 
@@ -160,8 +165,8 @@ public class CyclesSpringAiProperties {
      * cycles:
      *   spring-ai:
      *     estimate-from-prompt: true
-     *     input-cost-per-token: 25
-     *     output-cost-per-token: 100
+     *     input-cost-per-token: 250
+     *     output-cost-per-token: 1000
      *     token-estimator-encoding: o200k_base
      * }</pre>
      */

@@ -179,8 +179,8 @@ All known limitations from v0.1.0 are addressed:
 | `cycles.spring-ai.action-kind` | `llm.chat` | Action.kind label reported to Cycles. |
 | `cycles.spring-ai.action-name` | `spring-ai-chat` | Action.name label reported to Cycles. |
 | `cycles.spring-ai.fail-open` | `false` | When true, transport errors against Cycles are logged and the LLM call proceeds. Budget denials are always surfaced. |
-| `cycles.spring-ai.input-cost-per-token` | `0` | Per-input-token cost in the estimate unit. When set (with `output-cost-per-token`), the advisor commits actual token-based cost instead of the estimate. Example: 25 (= $2.50/1M tokens for OpenAI gpt-4o input). |
-| `cycles.spring-ai.output-cost-per-token` | `0` | Per-output-token cost. Example: 100 (= $10.00/1M tokens for OpenAI gpt-4o output). |
+| `cycles.spring-ai.input-cost-per-token` | `0` | Per-input-token cost in the estimate unit. When set (with `output-cost-per-token`), the advisor commits actual token-based cost instead of the estimate. Example: `250` (= $2.50/1M tokens for OpenAI gpt-4o input, since 1 USD = 100,000,000 USD_MICROCENTS). |
+| `cycles.spring-ai.output-cost-per-token` | `0` | Per-output-token cost. Example: `1000` (= $10.00/1M tokens for OpenAI gpt-4o output). |
 | `cycles.spring-ai.estimate-from-prompt` | `false` | When `true` and at least one cost-per-token rate is set, sizes the pre-call reservation from the prompt char count (`chars / 4` × combined rate). Falls back to `default-estimate` when the prompt is empty or rates are zero. |
 | `cycles.spring-ai.tool-action-kind` | `tool.call` | Action.kind label reported for `CyclesToolCallback`-wrapped tool invocations (distinct from chat's `action-kind`). |
 | `cycles.spring-ai.tool-action-name-prefix` | `spring-ai-tool:` | Prefix prepended to the wrapped tool's name to produce the action.name label (e.g. `spring-ai-tool:get_weather`). |
@@ -224,8 +224,8 @@ Default is `CharsPerTokenEstimator` (the v0.2.0 `chars / 4` heuristic). For tigh
 cycles:
   spring-ai:
     estimate-from-prompt: true
-    input-cost-per-token: 25
-    output-cost-per-token: 100
+    input-cost-per-token: 250                  # gpt-4o: $2.50/1M tokens × 100M microcents/USD = 250
+    output-cost-per-token: 1000                # gpt-4o: $10.00/1M tokens = 1000 microcents/token
     token-estimator-encoding: cl100k_base   # or o200k_base for gpt-4o family
 ```
 

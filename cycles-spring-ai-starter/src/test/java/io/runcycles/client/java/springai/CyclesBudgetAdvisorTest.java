@@ -699,7 +699,10 @@ class CyclesBudgetAdvisorTest {
 
     @Test
     void commitUsesComputedCostWhenRatesAndUsagePresent() {
-        // OpenAI gpt-4o-style rates: input=25 µ¢/tok, output=100 µ¢/tok.
+        // Arbitrary small rates to keep the arithmetic readable: input=25 µ¢/tok,
+        // output=100 µ¢/tok. (Real gpt-4o rates in USD_MICROCENTS would be
+        // 250 / 1000; using 25 / 100 here just makes the (100*25)+(50*100)=7500
+        // assertion easier to follow at a glance.)
         // 100 prompt + 50 completion → (100*25) + (50*100) = 2500 + 5000 = 7500 µ¢
         springAiProperties.setInputCostPerToken(25L);
         springAiProperties.setOutputCostPerToken(100L);
