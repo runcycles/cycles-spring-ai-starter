@@ -64,7 +64,7 @@
              (GHSA-mj4r-2hfc-f8p6), DNS codec input validation (GHSA-cm33-6792-r9fm),
              HttpProxyHandler header injection (GHSA-45q3-82m4-75jr), epoll RST half-close
              DoS (GHSA-rwm7-x88c-3g2p). 4.1.133.Final is the first patched 4.1.x release. -->
-        <netty.version>4.2.14.Final</netty.version>
+        <netty.version>4.2.15.Final</netty.version>
     </properties>
 
     <dependencyManagement>
