@@ -30,7 +30,7 @@
         <!-- Mirrors the starter pom's Netty override. See the canonical comment there for
              the full GHSA list and why the netty-bom must be imported (Spring Boot's BOM
              bakes literal Netty versions, so the property alone is a no-op). -->
-        <netty.version>4.2.14.Final</netty.version>
+        <netty.version>4.2.15.Final</netty.version>
     </properties>
 
     <dependencyManagement>
