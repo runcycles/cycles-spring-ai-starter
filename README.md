@@ -130,9 +130,10 @@ The bean is auto-configured but NOT auto-attached — applying a convention has 
 | 2xx | Success. |
 | Transport error / 5xx / 429 (incl. bodyless) / retryable error code | Scheduled on the retry engine (429's `Retry-After` honored). Never thrown — in BOTH `fail-open` modes; durability owns transient failures now. |
 | 401 / 403 | Error-logged and journaled for replay after credentials are fixed. Never released, never thrown. |
-| `RESERVATION_EXPIRED` | The server already returned the reserved budget to the pool; the spend is recovered via `POST /v1/events` (same idempotency key, `recovered_reservation_id` + `recovery_reason` metadata, original subject/action). |
+| `RESERVATION_EXPIRED` or raw 410 status (bodyless/mangled body) | The server already returned the reserved budget to the pool; the spend is recovered via `POST /v1/events` (same idempotency key, `recovered_reservation_id` + `recovery_reason` metadata, original subject/action). |
 | `RESERVATION_FINALIZED` / `IDEMPOTENCY_MISMATCH` | Warn only. |
-| Other genuine 4xx rejections | The only place `fail-open` still applies to commits: fail-open logs, fail-closed throws `IllegalStateException`. |
+| Other genuine 4xx rejections | The reservation is released best-effort with reason `commit_rejected_<code>` (the server refused the commit, so the held budget is returned), then the only place `fail-open` still applies to commits: fail-open logs, fail-closed throws `IllegalStateException`. Same behavior at all three commit sites (call advisor, stream advisor, tool callback) — no site releases a second time. |
+| Any other status (e.g. a 3xx from a proxy) | Unclassifiable — warn only; no throw, no schedule, no release. |
 
 **Streaming chat** (`chatClient.prompt(...).stream()`) — same lifecycle adapted to the reactive signal model. The entire pipeline is wrapped in `Flux.defer(...)` so reservation state is per-subscription (no leak when the Flux is assembled but never subscribed; resubscribing gets a fresh reservation):
 
@@ -140,7 +141,7 @@ The bean is auto-configured but NOT auto-attached — applying a convention has 
 |---|---|---|
 | Pre-stream | `POST /v1/reservations` | On subscription (inside `Flux.defer`). Reservation failures (denial, transport) surface as `onError` to the subscriber — the reactive-idiomatic shape; handle via `.onErrorResume(...)`. |
 | Stream | (advisor passes chunks through, tracking last seen) | `doOnNext(lastResponse::set)` |
-| Commit on complete | `POST /v1/reservations/{id}/commit` with usage from the last chunk | `concatWith(Mono.defer(...))` after the upstream emits `onComplete`. Commit runs **before** the subscriber observes terminal completion. Since 0.4.0 only a genuine 4xx rejection in fail-closed mode surfaces as `onError`; transient/auth/expired commit failures go to the durable retry engine and the stream completes normally. |
+| Commit on complete | `POST /v1/reservations/{id}/commit` with usage from the last chunk | `concatWith(Mono.defer(...))` after the upstream emits `onComplete`. Commit runs **before** the subscriber observes terminal completion. Since 0.4.0 only a genuine 4xx rejection in fail-closed mode surfaces as `onError` (the lifecycle has already released the rejected reservation with reason `commit_rejected_<code>` before the error — the stream's own `doOnError` release deliberately does not fire for it); transient/auth/expired commit failures go to the durable retry engine and the stream completes normally. |
 | Release on error | `POST /v1/reservations/{id}/release` | `doOnError` |
 | Release on cancel | `POST /v1/reservations/{id}/release` | `doOnCancel` |
 | Release on assembly failure | `POST /v1/reservations/{id}/release` | If `chain.nextStream(request)` throws synchronously after we reserved, we release and re-throw. |

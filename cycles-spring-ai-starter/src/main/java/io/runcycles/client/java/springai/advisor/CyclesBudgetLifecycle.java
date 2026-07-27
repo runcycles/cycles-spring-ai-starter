@@ -50,10 +50,15 @@ import java.util.UUID;
  * {@link CommitRetryEngine} for journaled background retry — in BOTH fail-open and
  * fail-closed modes; durability owns those failures now, replacing the old
  * fail-open silent-drop / fail-closed throw. When the reservation already expired
- * server-side ({@code RESERVATION_EXPIRED} — the server has returned the reserved
- * budget to the pool), the spend is recovered via the engine's {@code POST /v1/events}
- * fallback. Only genuine 4xx rejections keep the historical fail-open/fail-closed
- * policy (fail-open: log; fail-closed: throw).
+ * server-side ({@code RESERVATION_EXPIRED} — or a raw 410 status with an
+ * unparseable body — the server has returned the reserved budget to the pool), the
+ * spend is recovered via the engine's {@code POST /v1/events} fallback. Only genuine
+ * 4xx rejections keep the historical fail-open/fail-closed policy (fail-open: log;
+ * fail-closed: throw) — and the lifecycle releases the reservation itself
+ * (best-effort, reason {@code commit_rejected_<code>}) before applying that policy,
+ * so every commit site (call advisor, stream advisor, tool callback) observes ONE
+ * consistent behavior. Unclassifiable non-4xx statuses (e.g. a 3xx from a proxy)
+ * are warn-only, matching the library.
  *
  * <p><strong>Internal API.</strong> Public for cross-package access only. Not part of the
  * stable user-facing surface — methods may change between minor releases. The stable
@@ -126,7 +131,16 @@ public final class CyclesBudgetLifecycle {
      * @param subjectResolver    resolves the Cycles subject for each reservation.
      * @param tokenEstimator     estimates the input-side token count for prompt-based
      *                           reservation sizing.
+     * @deprecated <strong>Constructs a LIVE {@link JournaledCommitRetryEngine} per
+     *             instance</strong>: with production-shaped {@code CyclesProperties}
+     *             (base-url + api-key/tenant set) it writes an on-disk journal under
+     *             the real user home ({@code ~/.runcycles}) and performs a
+     *             once-per-JVM startup replay of pending records. In unit tests a
+     *             mocked client could replay — and discard — real pending commit
+     *             records. Tests (and Spring apps) should use the engine-injecting
+     *             constructor with a mock/managed {@link CommitRetryEngine} instead.
      */
+    @Deprecated
     public CyclesBudgetLifecycle(CyclesClient cyclesClient,
                                  CyclesProperties cyclesProperties,
                                  CyclesSpringAiProperties springAiProperties,
@@ -144,7 +158,12 @@ public final class CyclesBudgetLifecycle {
      * @param cyclesProperties   SDK-level configuration.
      * @param springAiProperties Spring AI integration configuration.
      * @param subjectResolver    resolves the Cycles subject for each reservation.
+     * @deprecated <strong>Constructs a LIVE {@link JournaledCommitRetryEngine} per
+     *             instance</strong> (writes to {@code ~/.runcycles}, performs a
+     *             once-per-JVM startup replay with production-shaped properties).
+     *             Tests should use the engine-injecting constructor with a mock.
      */
+    @Deprecated
     public CyclesBudgetLifecycle(CyclesClient cyclesClient,
                                  CyclesProperties cyclesProperties,
                                  CyclesSpringAiProperties springAiProperties,
@@ -161,7 +180,12 @@ public final class CyclesBudgetLifecycle {
      * @param cyclesClient       Cycles HTTP client.
      * @param cyclesProperties   SDK-level configuration (also feeds the default resolver).
      * @param springAiProperties Spring AI integration configuration.
+     * @deprecated <strong>Constructs a LIVE {@link JournaledCommitRetryEngine} per
+     *             instance</strong> (writes to {@code ~/.runcycles}, performs a
+     *             once-per-JVM startup replay with production-shaped properties).
+     *             Tests should use the engine-injecting constructor with a mock.
      */
+    @Deprecated
     public CyclesBudgetLifecycle(CyclesClient cyclesClient,
                                  CyclesProperties cyclesProperties,
                                  CyclesSpringAiProperties springAiProperties) {
@@ -262,12 +286,19 @@ public final class CyclesBudgetLifecycle {
      *       durability owns it now, in BOTH fail-open and fail-closed modes.</li>
      *   <li>401/403 — error-logged and scheduled for replay (fix credentials, restart).
      *       Never released, never thrown.</li>
-     *   <li>{@code RESERVATION_EXPIRED} — spend recovered via the engine's
-     *       {@code POST /v1/events} fallback.</li>
+     *   <li>{@code RESERVATION_EXPIRED} — or a raw 410 status whose body carries no
+     *       parseable error code (bodyless/mangled 410) — spend recovered via the
+     *       engine's {@code POST /v1/events} fallback.</li>
      *   <li>{@code RESERVATION_FINALIZED} / {@code IDEMPOTENCY_MISMATCH} — warn only.</li>
-     *   <li>Other genuine 4xx rejections — the ONLY place the historical
-     *       fail-open/fail-closed policy still applies (fail-open: log;
-     *       fail-closed: {@link IllegalStateException}).</li>
+     *   <li>Other genuine 4xx rejections — the reservation is first released
+     *       best-effort with reason {@code commit_rejected_<code>} (the server
+     *       rejected the commit, so the held budget must be returned), THEN the
+     *       historical fail-open/fail-closed policy applies (fail-open: log;
+     *       fail-closed: {@link IllegalStateException}). Because the release happens
+     *       here, callers must NOT release again when the fail-closed exception
+     *       propagates.</li>
+     *   <li>Any other non-2xx status (e.g. a 3xx from a proxy) — unclassifiable;
+     *       warn only, no throw, no schedule (matches the library).</li>
      * </ul>
      *
      * @param reservation  the active reservation to commit (carries the originating
@@ -323,9 +354,11 @@ public final class CyclesBudgetLifecycle {
             retryEngine.schedule(reservationId, commitBody, eventFallbackBody, null);
             return;
         }
-        if (errorCode == ErrorCode.RESERVATION_EXPIRED) {
+        if (errorCode == ErrorCode.RESERVATION_EXPIRED || commitResponse.getStatus() == 410) {
             // The server already returned the reserved budget to the pool; the spend
-            // still has to be recorded — recover via POST /v1/events.
+            // still has to be recorded — recover via POST /v1/events. The raw 410
+            // status also triggers this (matching the SDK): a bodyless or mangled 410
+            // is still an expired reservation, not a genuine rejection.
             log.warn("Cycles reservation expired before commit; recovering spend via POST /v1/events: "
                     + "reservationId={}", reservationId);
             retryEngine.scheduleEvent(reservationId, eventFallbackBody);
@@ -341,8 +374,23 @@ public final class CyclesBudgetLifecycle {
                     reservationId);
             return;
         }
+        if (!commitResponse.is4xx()) {
+            // Unclassifiable non-2xx status outside every known class (e.g. a 3xx
+            // from a misconfigured proxy). Matches the library's fleet template:
+            // warn only — no throw, no schedule, no release.
+            log.warn("Cycles commit got unclassifiable status={} for reservation {} "
+                            + "(warn only): body={}",
+                    commitResponse.getStatus(), reservationId, commitResponse.getBody());
+            return;
+        }
         // Genuine 4xx rejection (e.g. INVALID_REQUEST, UNIT_MISMATCH) — the only
         // remaining place where the historical fail-open/fail-closed policy applies.
+        // The server rejected the commit, so the reservation is still held: release
+        // it best-effort FIRST (matching the library's commit_rejected_<code>
+        // release) so every commit site — call advisor, stream advisor, tool
+        // callback — gets consistent behavior and never re-releases on the
+        // fail-closed throw below.
+        releaseQuietly(reservationId, "commit_rejected_" + errorCode);
         if (springAiProperties.isFailOpen()) {
             log.warn("Cycles commit rejected status={} error={} for reservation {} "
                             + "(fail-open=true; ignoring): body={}",

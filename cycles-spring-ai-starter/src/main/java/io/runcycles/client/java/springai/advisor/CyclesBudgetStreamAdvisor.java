@@ -83,7 +83,15 @@ public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
      * @param springAiProperties  the Spring AI integration properties.
      * @param subjectResolver     resolves the Cycles subject for each reservation.
      * @param tokenEstimator      estimates prompt tokens for prompt-based reservation sizing.
+     * @deprecated <strong>Constructs a LIVE journaled commit-retry engine per
+     *             instance</strong>: with production-shaped {@code CyclesProperties}
+     *             it writes an on-disk journal under the real user home
+     *             ({@code ~/.runcycles}) and performs a once-per-JVM startup replay
+     *             of pending records — in unit tests a mocked client could replay
+     *             and discard real pending commits. Tests should use the
+     *             engine-injecting constructor with a mock {@link CommitRetryEngine}.
      */
+    @Deprecated
     public CyclesBudgetStreamAdvisor(CyclesClient cyclesClient,
                                      CyclesProperties cyclesProperties,
                                      CyclesSpringAiProperties springAiProperties,
@@ -101,7 +109,13 @@ public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
      * @param cyclesProperties    the SDK-level properties.
      * @param springAiProperties  the Spring AI integration properties.
      * @param subjectResolver     resolves the Cycles subject.
+     * @deprecated <strong>Constructs a LIVE journaled commit-retry engine per
+     *             instance</strong> (writes to {@code ~/.runcycles}, performs a
+     *             once-per-JVM startup replay with production-shaped properties).
+     *             Tests should use the engine-injecting constructor with a mock
+     *             {@link CommitRetryEngine}.
      */
+    @Deprecated
     public CyclesBudgetStreamAdvisor(CyclesClient cyclesClient,
                                      CyclesProperties cyclesProperties,
                                      CyclesSpringAiProperties springAiProperties,
@@ -117,7 +131,13 @@ public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
      * @param cyclesClient        the Cycles HTTP client.
      * @param cyclesProperties    the SDK-level properties.
      * @param springAiProperties  the Spring AI integration properties.
+     * @deprecated <strong>Constructs a LIVE journaled commit-retry engine per
+     *             instance</strong> (writes to {@code ~/.runcycles}, performs a
+     *             once-per-JVM startup replay with production-shaped properties).
+     *             Tests should use the engine-injecting constructor with a mock
+     *             {@link CommitRetryEngine}.
      */
+    @Deprecated
     public CyclesBudgetStreamAdvisor(CyclesClient cyclesClient,
                                      CyclesProperties cyclesProperties,
                                      CyclesSpringAiProperties springAiProperties) {
@@ -204,6 +224,11 @@ public class CyclesBudgetStreamAdvisor implements StreamAdvisor {
                     // handling, only genuine 4xx rejections in fail-closed mode still
                     // throw (and surface as onError); transient/auth/expired failures
                     // are owned by the CommitRetryEngine and never fail the stream.
+                    // The doOnError above is attached to the UPSTREAM (before this
+                    // concatWith), so it deliberately does not fire for a commit
+                    // failure — that is correct: the lifecycle has already released
+                    // the rejected reservation itself (reason commit_rejected_<code>)
+                    // before throwing, so no release must happen on this error path.
                     .concatWith(Mono.<ChatClientResponse>defer(() -> {
                         if (reservation == null) {
                             return Mono.empty();

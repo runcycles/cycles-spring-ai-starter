@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -299,50 +300,124 @@ class CyclesBudgetLifecycleDurableCommitTest {
         verifyNoInteractions(retryEngine);
     }
 
-    // ---- Genuine 4xx rejections keep the old fail-open/fail-closed policy --
+    // ---- Genuine 4xx rejections: release first, then old fail policy ------
 
     @Test
-    void genuineRejectionThrowsWhenFailClosed() {
+    void genuineRejectionReleasesWithCommitRejectedReasonThenThrowsWhenFailClosed() {
+        // Harmonized behavior across all three commit sites: the lifecycle itself
+        // releases the rejected reservation (the server refused the commit, so the
+        // held budget must be returned) BEFORE applying the fail-closed throw.
+        // Callers must never release again on that exception.
         CyclesBudgetLifecycle.ActiveReservation reservation = reserve("res-rejected");
         when(cyclesClient.commitReservation(eq("res-rejected"), any(CommitRequest.class)))
                 .thenReturn(CyclesResponse.httpError(422, "unit mismatch",
                         Map.of("error", "UNIT_MISMATCH")));
+        when(cyclesClient.releaseReservation(eq("res-rejected"), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
 
         assertThatThrownBy(() -> lifecycle.commitOrFailOpen(reservation, null))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("commit HTTP failure")
                 .hasMessageContaining("res-rejected");
 
+        ArgumentCaptor<ReleaseRequest> release = ArgumentCaptor.forClass(ReleaseRequest.class);
+        verify(cyclesClient, times(1)).releaseReservation(eq("res-rejected"), release.capture());
+        assertThat(release.getValue().getReason()).isEqualTo("commit_rejected_UNIT_MISMATCH");
         verifyNoInteractions(retryEngine);
     }
 
     @Test
-    void genuineRejectionLoggedWhenFailOpen() {
+    void genuineRejectionReleasesWithCommitRejectedReasonWhenFailOpen() {
         springAiProperties.setFailOpen(true);
         CyclesBudgetLifecycle.ActiveReservation reservation = reserve("res-rejected-open");
         when(cyclesClient.commitReservation(eq("res-rejected-open"), any(CommitRequest.class)))
                 .thenReturn(CyclesResponse.httpError(422, "unit mismatch",
                         Map.of("error", "UNIT_MISMATCH")));
+        when(cyclesClient.releaseReservation(eq("res-rejected-open"), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
 
         assertThatCode(() -> lifecycle.commitOrFailOpen(reservation, null))
                 .doesNotThrowAnyException();
 
+        ArgumentCaptor<ReleaseRequest> release = ArgumentCaptor.forClass(ReleaseRequest.class);
+        verify(cyclesClient, times(1)).releaseReservation(eq("res-rejected-open"), release.capture());
+        assertThat(release.getValue().getReason()).isEqualTo("commit_rejected_UNIT_MISMATCH");
         verifyNoInteractions(retryEngine);
+    }
+
+    @Test
+    void genuineRejectionReleaseFailureDoesNotMaskFailClosedException() {
+        // The release is best-effort (releaseQuietly): a release transport failure
+        // must not replace the fail-closed IllegalStateException.
+        CyclesBudgetLifecycle.ActiveReservation reservation = reserve("res-rejected-relfail");
+        when(cyclesClient.commitReservation(eq("res-rejected-relfail"), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(422, "unit mismatch",
+                        Map.of("error", "UNIT_MISMATCH")));
+        when(cyclesClient.releaseReservation(eq("res-rejected-relfail"), any(ReleaseRequest.class)))
+                .thenThrow(new RuntimeException("release transport failure"));
+
+        assertThatThrownBy(() -> lifecycle.commitOrFailOpen(reservation, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("commit HTTP failure");
     }
 
     @Test
     void bodyless4xxWithNoErrorCodeTreatedAsGenuineRejection() {
         // A 404 with no error envelope (errorCode=null) is not classifiable as
-        // transient — old policy applies (fail-closed: throw).
+        // transient — old policy applies (fail-closed: throw), after the lifecycle's
+        // own commit_rejected release (reason carries the null code, matching the
+        // library's "commit_rejected_" + errorCode).
         CyclesBudgetLifecycle.ActiveReservation reservation = reserve("res-404");
         when(cyclesClient.commitReservation(eq("res-404"), any(CommitRequest.class)))
                 .thenReturn(CyclesResponse.httpError(404, "not found", null));
+        when(cyclesClient.releaseReservation(eq("res-404"), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
 
         assertThatThrownBy(() -> lifecycle.commitOrFailOpen(reservation, null))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("commit HTTP failure");
 
+        ArgumentCaptor<ReleaseRequest> release = ArgumentCaptor.forClass(ReleaseRequest.class);
+        verify(cyclesClient).releaseReservation(eq("res-404"), release.capture());
+        assertThat(release.getValue().getReason()).isEqualTo("commit_rejected_null");
         verifyNoInteractions(retryEngine);
+    }
+
+    // ---- Raw 410 status (bodyless/mangled) → event fallback ---------------
+
+    @Test
+    void commit410WithUnparseableBodySchedulesEventFallback() {
+        // Fleet decision D1 (matching the SDK): a raw 410 whose body carries no
+        // parseable error code is still an expired reservation — recover via
+        // POST /v1/events, NOT the genuine-4xx release/throw policy.
+        CyclesBudgetLifecycle.ActiveReservation reservation = reserve("res-410-raw");
+        when(cyclesClient.commitReservation(eq("res-410-raw"), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(410, "gone", null));
+
+        assertThatCode(() -> lifecycle.commitOrFailOpen(reservation, null))
+                .doesNotThrowAnyException();
+
+        verify(retryEngine).scheduleEvent(eq("res-410-raw"), anyMap());
+        verify(retryEngine, never()).schedule(anyString(), anyMap(), anyMap(), any());
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
+    // ---- Unclassifiable non-4xx statuses → warn only ----------------------
+
+    @Test
+    void unclassifiableNon4xxStatusWarnsOnlyEvenWhenFailClosed() {
+        // A 302 from a misconfigured proxy is not 2xx, not transient, not 4xx —
+        // aligned with the library: warn only. No throw (even fail-closed), no
+        // schedule, no release.
+        CyclesBudgetLifecycle.ActiveReservation reservation = reserve("res-302");
+        when(cyclesClient.commitReservation(eq("res-302"), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(302, "redirect", null));
+
+        assertThatCode(() -> lifecycle.commitOrFailOpen(reservation, null))
+                .doesNotThrowAnyException();
+
+        verifyNoInteractions(retryEngine);
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
     }
 
     // ---- Helpers ---------------------------------------------------------

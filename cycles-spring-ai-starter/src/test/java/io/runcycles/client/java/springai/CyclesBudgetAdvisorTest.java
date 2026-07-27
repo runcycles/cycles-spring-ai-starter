@@ -41,6 +41,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -442,28 +443,37 @@ class CyclesBudgetAdvisorTest {
     }
 
     @Test
-    void commitGenuine4xxRejectionStillThrowsWhenFailClosed() {
+    void commitGenuine4xxRejectionReleasesOnceThenThrowsWhenFailClosed() {
         // A genuine rejection (INVALID_REQUEST — not transient, not auth, not
-        // expired/finalized) keeps the historical fail-closed throw. This is the
-        // only commit failure class where the old policy still applies.
+        // expired/finalized) keeps the historical fail-closed throw — but the
+        // LIFECYCLE releases the rejected reservation itself (reason
+        // commit_rejected_<code>) before throwing. The advisor must NOT release
+        // again while the exception propagates: exactly one release, with the
+        // commit_rejected reason (never a misleading chat-call-failed one).
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(reservationAllow("res-1"));
         when(chain.nextCall(request)).thenReturn(response);
         when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
                 .thenReturn(CyclesResponse.httpError(400, "bad request",
                         Map.of("error", "INVALID_REQUEST")));
+        when(cyclesClient.releaseReservation(eq("res-1"), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
 
         assertThatThrownBy(() -> advisor.adviseCall(request, chain))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("commit HTTP failure");
 
+        ArgumentCaptor<ReleaseRequest> release = ArgumentCaptor.forClass(ReleaseRequest.class);
+        verify(cyclesClient, times(1)).releaseReservation(eq("res-1"), release.capture());
+        assertThat(release.getValue().getReason()).isEqualTo("commit_rejected_INVALID_REQUEST");
         verifyNoInteractions(retryEngine);
     }
 
     @Test
-    void commitGenuine4xxRejectionLoggedWhenFailOpen() {
-        // Genuine rejection under fail-open keeps the historical log-and-proceed.
-        // The retry engine is NOT engaged — retrying a genuine rejection can't succeed.
+    void commitGenuine4xxRejectionReleasesAndLogsWhenFailOpen() {
+        // Genuine rejection under fail-open keeps the historical log-and-proceed —
+        // after the lifecycle's commit_rejected release. The retry engine is NOT
+        // engaged — retrying a genuine rejection can't succeed.
         springAiProperties.setFailOpen(true);
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(reservationAllow("res-1"));
@@ -471,11 +481,15 @@ class CyclesBudgetAdvisorTest {
         when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
                 .thenReturn(CyclesResponse.httpError(400, "bad request",
                         Map.of("error", "INVALID_REQUEST")));
+        when(cyclesClient.releaseReservation(eq("res-1"), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
 
         ChatClientResponse result = advisor.adviseCall(request, chain);
 
         assertThat(result).isSameAs(response);
-        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+        ArgumentCaptor<ReleaseRequest> release = ArgumentCaptor.forClass(ReleaseRequest.class);
+        verify(cyclesClient, times(1)).releaseReservation(eq("res-1"), release.capture());
+        assertThat(release.getValue().getReason()).isEqualTo("commit_rejected_INVALID_REQUEST");
         verifyNoInteractions(retryEngine);
     }
 
