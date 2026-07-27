@@ -6,8 +6,11 @@ import io.runcycles.client.java.spring.model.CommitRequest;
 import io.runcycles.client.java.spring.model.CyclesResponse;
 import io.runcycles.client.java.spring.model.ReleaseRequest;
 import io.runcycles.client.java.spring.model.ReservationCreateRequest;
+import io.runcycles.client.java.spring.retry.CommitRetryEngine;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
+import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -29,10 +32,13 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -51,6 +57,7 @@ class CyclesBudgetAdvisorTest {
     @Mock CallAdvisorChain chain;
     @Mock ChatClientRequest request;
     @Mock ChatClientResponse response;
+    @Mock CommitRetryEngine retryEngine;
 
     private CyclesProperties cyclesProperties;
     private CyclesSpringAiProperties springAiProperties;
@@ -65,7 +72,12 @@ class CyclesBudgetAdvisorTest {
 
         springAiProperties = new CyclesSpringAiProperties();
 
-        advisor = new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties);
+        // Mocked retry engine: commit-failure tests verify scheduling without a real
+        // background executor or journal (a real engine must never point its journal
+        // at the developer's user.home from a unit test).
+        advisor = new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties,
+                new PropertiesSubjectResolver(cyclesProperties), new CharsPerTokenEstimator(),
+                retryEngine);
     }
 
     // ---- Metadata --------------------------------------------------------
@@ -343,41 +355,47 @@ class CyclesBudgetAdvisorTest {
         verifyNoInteractions(chain);
     }
 
-    // ---- Commit fail-open / fail-closed ---------------------------------
+    // ---- Commit durability (transient failures → retry engine) -----------
 
     @Test
     void commitFailureDoesNotReleaseReservation() {
         // After chain.nextCall succeeded, a commit failure must NOT release the
         // reservation — the LLM call already happened and budget was consumed.
-        // Releasing would under-count actual spend.
+        // Releasing would under-count actual spend. Since durable commit handling,
+        // the failed commit is handed to the retry engine instead of throwing.
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(reservationAllow("res-1"));
         when(chain.nextCall(request)).thenReturn(response);
         when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
                 .thenThrow(new RuntimeException("connection refused"));
 
-        assertThatThrownBy(() -> advisor.adviseCall(request, chain))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("commit failed");
+        ChatClientResponse result = advisor.adviseCall(request, chain);
 
+        assertThat(result).isSameAs(response);
         verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+        verify(retryEngine).schedule(eq("res-1"), anyMap(), anyMap(), isNull());
     }
 
     @Test
-    void commitTransportFailureSurfacesWhenFailClosed() {
+    void commitTransportFailureSchedulesRetryEvenWhenFailClosed() {
+        // fail-open=false (default). Pre-0.4.0 behavior threw IllegalStateException,
+        // failing a call whose spend already happened. Durability owns transient
+        // commit failures now: no throw, the engine retries in the background.
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(reservationAllow("res-1"));
         when(chain.nextCall(request)).thenReturn(response);
         when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
                 .thenThrow(new RuntimeException("connection refused"));
 
-        assertThatThrownBy(() -> advisor.adviseCall(request, chain))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("commit failed");
+        assertThatCode(() -> advisor.adviseCall(request, chain)).doesNotThrowAnyException();
+
+        verify(retryEngine).schedule(eq("res-1"), anyMap(), anyMap(), isNull());
     }
 
     @Test
-    void commitTransportFailureSwallowedWhenFailOpen() {
+    void commitTransportFailureSchedulesRetryWhenFailOpen() {
+        // fail-open=true. Pre-0.4.0 behavior logged and silently dropped the spend.
+        // Durability owns it now: the engine journals and retries.
         springAiProperties.setFailOpen(true);
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(reservationAllow("res-1"));
@@ -388,34 +406,77 @@ class CyclesBudgetAdvisorTest {
         ChatClientResponse result = advisor.adviseCall(request, chain);
 
         assertThat(result).isSameAs(response);
+        verify(retryEngine).schedule(eq("res-1"), anyMap(), anyMap(), isNull());
     }
 
     @Test
-    void commitHttpFailureSurfacesWhenFailClosed() {
+    void commitHttp5xxSchedulesRetryEvenWhenFailClosed() {
+        // 5xx is transient — the server may recover. No throw (even fail-closed),
+        // no silent drop: durable retry.
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(reservationAllow("res-1"));
         when(chain.nextCall(request)).thenReturn(response);
         when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
                 .thenReturn(CyclesResponse.httpError(500, "boom", Map.of()));
+
+        ChatClientResponse result = advisor.adviseCall(request, chain);
+
+        assertThat(result).isSameAs(response);
+        verify(retryEngine).schedule(eq("res-1"), anyMap(), anyMap(), isNull());
+    }
+
+    @Test
+    void commitHttp5xxSchedulesRetryWhenFailOpen() {
+        springAiProperties.setFailOpen(true);
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(500, "boom", Map.of()));
+
+        ChatClientResponse result = advisor.adviseCall(request, chain);
+
+        assertThat(result).isSameAs(response);
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+        verify(retryEngine).schedule(eq("res-1"), anyMap(), anyMap(), isNull());
+    }
+
+    @Test
+    void commitGenuine4xxRejectionStillThrowsWhenFailClosed() {
+        // A genuine rejection (INVALID_REQUEST — not transient, not auth, not
+        // expired/finalized) keeps the historical fail-closed throw. This is the
+        // only commit failure class where the old policy still applies.
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-1"));
+        when(chain.nextCall(request)).thenReturn(response);
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(400, "bad request",
+                        Map.of("error", "INVALID_REQUEST")));
 
         assertThatThrownBy(() -> advisor.adviseCall(request, chain))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("commit HTTP failure");
+
+        verifyNoInteractions(retryEngine);
     }
 
     @Test
-    void commitHttpFailureSwallowedWhenFailOpen() {
+    void commitGenuine4xxRejectionLoggedWhenFailOpen() {
+        // Genuine rejection under fail-open keeps the historical log-and-proceed.
+        // The retry engine is NOT engaged — retrying a genuine rejection can't succeed.
         springAiProperties.setFailOpen(true);
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(reservationAllow("res-1"));
         when(chain.nextCall(request)).thenReturn(response);
         when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
-                .thenReturn(CyclesResponse.httpError(500, "boom", Map.of()));
+                .thenReturn(CyclesResponse.httpError(400, "bad request",
+                        Map.of("error", "INVALID_REQUEST")));
 
         ChatClientResponse result = advisor.adviseCall(request, chain);
 
         assertThat(result).isSameAs(response);
         verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+        verifyNoInteractions(retryEngine);
     }
 
     // ---- Release on chain exception -------------------------------------

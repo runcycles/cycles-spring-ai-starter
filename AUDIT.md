@@ -41,6 +41,13 @@ The Spring AI starter does not own its own protocol — it delegates to the Cycl
 | jtokkit token estimator | `io.runcycles.client.java.springai.tokenizer.JtokkitPromptTokenEstimator` | Real BPE encoding via `com.knuddels:jtokkit:1.1.0` (`optional=true` Maven dep). Supports `cl100k_base`, `o200k_base`, `p50k_base`, `p50k_edit`, `r50k_base`. Auto-configured when `cycles.spring-ai.token-estimator-encoding` is set + jtokkit on classpath |
 | Observation context keys | `io.runcycles.client.java.springai.observation.CyclesObservationContextKeys` | Internal constants — well-known keys used to thread Cycles state through `ChatClientRequest.context()` for the observation convention to read. Only `RESERVATION_ID = "cycles.reservation_id"` currently |
 
+## Public surface added in 0.4.0
+
+| Component | FQCN | Notes |
+|---|---|---|
+| Commit retry engine bean | `io.runcycles.client.java.spring.retry.CommitRetryEngine` (from the SDK) | Fallback `@Bean @ConditionalOnMissingBean` registration of `JournaledCommitRetryEngine` in `CyclesSpringAiAutoConfiguration` — the SDK's own engine bean wins when `CyclesAutoConfiguration` is active. Injected into both advisors and the tool gate via new engine-accepting constructors (old constructors preserved; they build a private engine). Spring lifecycle handles the `DisposableBean` flush |
+| Active reservation holder (internal API) | `io.runcycles.client.java.springai.advisor.CyclesBudgetLifecycle.ActiveReservation` | Record (id + originating `ReservationCreateRequest`). `reserveOrFailOpen(...)` returns it (was `String`); `commitOrFailOpen(...)` takes it — threads reservation-time subject/action to the commit site for the `POST /v1/events` fallback body. Internal-API change only |
+
 ## Property keys (v0.1.0)
 
 | Key | Type | Default | Notes |
@@ -87,6 +94,7 @@ When active, it registers (each with `@ConditionalOnMissingBean` semantics so us
 - A name-conditional `ChatClientCustomizer` (bean name `cyclesChatClientCustomizer`) that attaches both advisors via `builder.defaultAdvisors(callAdvisor, streamAdvisor)`. Name-keyed so it doesn't back off in the presence of unrelated `ChatClientCustomizer` beans (memory, RAG, etc.).
 - `CyclesToolGate` — the tool-wrapper factory (not auto-applied to tools).
 - `CyclesChatClientObservationConvention` — the observation convention bean (not auto-attached to builders). As of 0.3.0-SNAPSHOT also emits `cycles.reservation_id` as a high-cardinality KeyValue when applied (controlled by `cycles.spring-ai.emit-reservation-id-on-trace`).
+- `CommitRetryEngine` — fallback `JournaledCommitRetryEngine` registration; backs off to the SDK's own engine bean when `CyclesAutoConfiguration` is active. **Added in 0.4.0.**
 
 If any condition fails, none of the above register.
 
@@ -108,6 +116,7 @@ Future Cycles advisors (`CyclesAuthorityAdvisor` etc.) should follow the same pr
    - `input-cost-per-token` and/or `output-cost-per-token` set + usage present → actual = `(promptTokens × inputRate) + (completionTokens × outputRate)`.
    - Otherwise → actual = estimate (v0.1.0-compatible fallback).
 5. On exception → `POST /v1/reservations/{id}/release` with reason = `chat-call-failed: <ExceptionClass>`, then the original exception is re-thrown.
+6. **Commit failure (0.4.0, applies to all three invocation types):** transient (transport / 5xx / 429 incl. bodyless / retryable code) and 401/403 → scheduled on the `CommitRetryEngine` (429 `Retry-After` honored), never thrown in either fail mode; `RESERVATION_EXPIRED` → spend recovered via `POST /v1/events` (commit idempotency key, reservation-time subject/action, `recovered_reservation_id` / `recovery_reason` metadata, no `overage_policy`); `RESERVATION_FINALIZED` / `IDEMPOTENCY_MISMATCH` → warn only; other genuine 4xx → historical fail-open/fail-closed policy (the only place it still applies to commits).
 
 ### Streaming chat (`chatClient.prompt(...).stream()`)
 
@@ -128,6 +137,9 @@ The entire pipeline is wrapped in `Flux.defer(...)`, so all of the steps below e
 5. On `RuntimeException` from the wrapped tool → `POST .../release` with reason = `tool-call-failed: <ExceptionClass>`, then re-throw.
 
 ## Change log
+
+### 0.4.0 — 2026-07-27
+Durable commit handling. `commitOrFailOpen` no longer makes one fail-open-swallowed / fail-closed-thrown attempt: it adopts cycles-client-java-spring **0.3.0**'s durability machinery (`CommitRetryEngine` / `JournaledCommitRetryEngine`, from cycles-spring-boot-starter PR #109 / python PR #89 lineage) — transient and 401/403 failures are journaled and retried in both fail modes, `RESERVATION_EXPIRED` spend is recovered via `POST /v1/events`, and only genuine 4xx rejections keep the old fail-open/fail-closed policy. Engine bean shared with the SDK auto-config (fallback registration here); internal-API `reserveOrFailOpen`/`commitOrFailOpen` signatures changed (`ActiveReservation`). See [CHANGELOG.md](./CHANGELOG.md) `[0.4.0]`.
 
 ### Unreleased — 2026-05-13
 Build-only patch — no public-API, property-key, or wire-protocol changes. Pinned transitive Netty to **4.1.133.Final** (was 4.1.132.Final, managed by `spring-boot-dependencies:3.5.14`) via a `netty-bom` import placed *before* `spring-boot-dependencies` in both `cycles-spring-ai-starter/pom.xml` and `cycles-spring-ai-demo/pom.xml`. Maven's first-import-wins rule applies because Spring Boot's published BOM bakes in literal Netty versions rather than the `${netty.version}` placeholder, so the property override alone is a no-op. Closes the batch of high/medium Netty CVEs flagged by OSSF Scorecard alert #7: GHSA-mj4r-2hfc-f8p6, GHSA-cm33-6792-r9fm, GHSA-38f8-5428-x5cv, GHSA-57rv-r2g8-2cj3, GHSA-f6hv-jmp6-3vwv, GHSA-m4cv-j2px-7723, GHSA-v8h7-rr48-vmmv, GHSA-xxqh-mfjm-7mv9, GHSA-45q3-82m4-75jr, GHSA-rwm7-x88c-3g2p (HTTP smuggling, HttpClientCodec desync, decompression-bomb DoS, DNS codec input validation, HttpProxyHandler header injection, epoll RST half-close DoS).

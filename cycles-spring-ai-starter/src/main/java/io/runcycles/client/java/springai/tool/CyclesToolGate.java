@@ -2,6 +2,7 @@ package io.runcycles.client.java.springai.tool;
 
 import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
+import io.runcycles.client.java.spring.retry.CommitRetryEngine;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
@@ -34,9 +35,37 @@ public class CyclesToolGate {
     private final CyclesProperties cyclesProperties;
     private final CyclesSpringAiProperties springAiProperties;
     private final SubjectResolver subjectResolver;
+    private final CommitRetryEngine retryEngine;
 
     /**
-     * Constructs the tool gate factory with an explicit subject resolver.
+     * Constructs the tool gate factory with explicit subject-resolver and
+     * commit-retry strategies. Preferred constructor — wired by the auto-configuration
+     * so every wrapped tool shares the Spring-managed durable retry engine.
+     *
+     * @param cyclesClient       Cycles HTTP client.
+     * @param cyclesProperties   SDK-level configuration.
+     * @param springAiProperties Spring AI integration configuration.
+     * @param subjectResolver    resolves the Cycles subject for each tool reservation.
+     *                           Tool callbacks don't carry a {@code ChatClientRequest};
+     *                           the resolver is invoked with {@code null} on the tool path.
+     * @param retryEngine        durable retry engine that owns failed commits.
+     */
+    public CyclesToolGate(CyclesClient cyclesClient,
+                          CyclesProperties cyclesProperties,
+                          CyclesSpringAiProperties springAiProperties,
+                          SubjectResolver subjectResolver,
+                          CommitRetryEngine retryEngine) {
+        this.cyclesClient = cyclesClient;
+        this.cyclesProperties = cyclesProperties;
+        this.springAiProperties = springAiProperties;
+        this.subjectResolver = subjectResolver;
+        this.retryEngine = retryEngine;
+    }
+
+    /**
+     * Backward-compatible constructor — wrapped tools each create a private durable
+     * retry engine internally (see {@code CyclesBudgetLifecycle}). Prefer the
+     * engine-injecting constructor in Spring apps.
      *
      * @param cyclesClient       Cycles HTTP client.
      * @param cyclesProperties   SDK-level configuration.
@@ -49,10 +78,7 @@ public class CyclesToolGate {
                           CyclesProperties cyclesProperties,
                           CyclesSpringAiProperties springAiProperties,
                           SubjectResolver subjectResolver) {
-        this.cyclesClient = cyclesClient;
-        this.cyclesProperties = cyclesProperties;
-        this.springAiProperties = springAiProperties;
-        this.subjectResolver = subjectResolver;
+        this(cyclesClient, cyclesProperties, springAiProperties, subjectResolver, null);
     }
 
     /**
@@ -77,6 +103,10 @@ public class CyclesToolGate {
      *         commits on success, releases on exception.
      */
     public CyclesToolCallback wrap(ToolCallback toolCallback) {
+        if (retryEngine != null) {
+            return new CyclesToolCallback(toolCallback, cyclesClient, cyclesProperties,
+                    springAiProperties, subjectResolver, retryEngine);
+        }
         return new CyclesToolCallback(toolCallback, cyclesClient, cyclesProperties,
                 springAiProperties, subjectResolver);
     }

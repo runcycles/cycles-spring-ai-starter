@@ -73,6 +73,14 @@ public class CyclesSpringAiProperties {
      * Budget denials ({@link io.runcycles.client.java.springai.CyclesBudgetDeniedException})
      * are always surfaced regardless of this setting — fail-open only applies to
      * transport / unexpected errors, not to deliberate denials.
+     *
+     * <p>Since 0.4.0 this setting governs the RESERVE side and only genuine 4xx
+     * rejections on the COMMIT side. Transient commit failures (transport, 5xx, 429),
+     * credential failures (401/403), and expired reservations are owned by the durable
+     * {@code CommitRetryEngine} in BOTH modes — journaled and retried in the background
+     * (with a {@code POST /v1/events} fallback on expiry) instead of being silently
+     * dropped (old fail-open) or thrown (old fail-closed), because a commit records
+     * spend that already happened.
      */
     private boolean failOpen = false;
 

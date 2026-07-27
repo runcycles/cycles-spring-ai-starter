@@ -3,6 +3,8 @@ package io.runcycles.client.java.springai.autoconfigure;
 import io.runcycles.client.java.spring.autoconfigure.CyclesAutoConfiguration;
 import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
+import io.runcycles.client.java.spring.retry.CommitRetryEngine;
+import io.runcycles.client.java.spring.retry.JournaledCommitRetryEngine;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.observation.CyclesChatClientObservationConvention;
@@ -160,6 +162,31 @@ public class CyclesSpringAiAutoConfiguration {
     }
 
     /**
+     * Durable commit-retry engine — fallback registration for contexts where the
+     * underlying {@code cycles-client-java-spring} auto-configuration (which registers
+     * the same engine) is not active, e.g. when the application supplies its own
+     * {@link CyclesClient} bean with {@link CyclesAutoConfiguration} excluded.
+     *
+     * <p>{@link ConditionalOnMissingBean} means the SDK's own engine bean (registered
+     * first thanks to {@link AutoConfigureAfter}) always wins, so chat advisors, tool
+     * callbacks, and {@code @Cycles}-annotated methods all share ONE engine (single
+     * journal identity, single retry thread). Registered as a Spring bean so the
+     * engine's {@code DisposableBean} flush runs on context shutdown; pending work
+     * that outlives the flush timeout stays journaled ({@code cycles.journal.*}) and
+     * replays on the next run.
+     *
+     * @param cyclesClient     the Cycles HTTP client.
+     * @param cyclesProperties SDK-level configuration (retry, journal, identity).
+     * @return the durable journal-backed commit retry engine.
+     */
+    @Bean
+    @ConditionalOnMissingBean
+    public CommitRetryEngine cyclesCommitRetryEngine(CyclesClient cyclesClient,
+                                                     CyclesProperties cyclesProperties) {
+        return new JournaledCommitRetryEngine(cyclesClient, cyclesProperties);
+    }
+
+    /**
      * Creates the Cycles non-streaming budget advisor bean.
      *
      * <p>{@link ConditionalOnMissingBean} causes this auto-configured advisor to back off
@@ -172,6 +199,7 @@ public class CyclesSpringAiAutoConfiguration {
      * @param springAiProperties  Spring AI integration configuration.
      * @param subjectResolver     resolves the Cycles subject per reservation.
      * @param tokenEstimator      estimates prompt tokens for prompt-based reservation sizing.
+     * @param retryEngine         durable retry engine that owns failed commits.
      * @return the budget-gating call advisor.
      */
     @Bean
@@ -180,9 +208,10 @@ public class CyclesSpringAiAutoConfiguration {
                                                    CyclesProperties cyclesProperties,
                                                    CyclesSpringAiProperties springAiProperties,
                                                    SubjectResolver subjectResolver,
-                                                   PromptTokenEstimator tokenEstimator) {
+                                                   PromptTokenEstimator tokenEstimator,
+                                                   CommitRetryEngine retryEngine) {
         return new CyclesBudgetAdvisor(cyclesClient, cyclesProperties, springAiProperties,
-                subjectResolver, tokenEstimator);
+                subjectResolver, tokenEstimator, retryEngine);
     }
 
     /**
@@ -197,6 +226,7 @@ public class CyclesSpringAiAutoConfiguration {
      * @param springAiProperties  Spring AI integration configuration.
      * @param subjectResolver     resolves the Cycles subject per reservation.
      * @param tokenEstimator      estimates prompt tokens for prompt-based reservation sizing.
+     * @param retryEngine         durable retry engine that owns failed commits.
      * @return the streaming budget-gating advisor.
      */
     @Bean
@@ -205,9 +235,10 @@ public class CyclesSpringAiAutoConfiguration {
                                                                CyclesProperties cyclesProperties,
                                                                CyclesSpringAiProperties springAiProperties,
                                                                SubjectResolver subjectResolver,
-                                                               PromptTokenEstimator tokenEstimator) {
+                                                               PromptTokenEstimator tokenEstimator,
+                                                               CommitRetryEngine retryEngine) {
         return new CyclesBudgetStreamAdvisor(cyclesClient, cyclesProperties, springAiProperties,
-                subjectResolver, tokenEstimator);
+                subjectResolver, tokenEstimator, retryEngine);
     }
 
     /**
@@ -251,6 +282,7 @@ public class CyclesSpringAiAutoConfiguration {
      * @param subjectResolver    resolves the Cycles subject for each tool reservation.
      *                           Invoked with {@code null} for the {@code ChatClientRequest}
      *                           parameter because tool callbacks don't carry one.
+     * @param retryEngine        durable retry engine that owns failed tool commits.
      * @return the tool gate factory.
      */
     @Bean
@@ -258,8 +290,10 @@ public class CyclesSpringAiAutoConfiguration {
     public CyclesToolGate cyclesToolGate(CyclesClient cyclesClient,
                                          CyclesProperties cyclesProperties,
                                          CyclesSpringAiProperties springAiProperties,
-                                         SubjectResolver subjectResolver) {
-        return new CyclesToolGate(cyclesClient, cyclesProperties, springAiProperties, subjectResolver);
+                                         SubjectResolver subjectResolver,
+                                         CommitRetryEngine retryEngine) {
+        return new CyclesToolGate(cyclesClient, cyclesProperties, springAiProperties,
+                subjectResolver, retryEngine);
     }
 
     /**

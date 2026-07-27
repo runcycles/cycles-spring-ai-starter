@@ -2,8 +2,10 @@ package io.runcycles.client.java.springai.tool;
 
 import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
+import io.runcycles.client.java.spring.retry.CommitRetryEngine;
 import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetLifecycle;
+import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
 import org.springframework.ai.chat.model.ToolContext;
@@ -46,9 +48,36 @@ public class CyclesToolCallback implements ToolCallback {
     private final CyclesSpringAiProperties springAiProperties;
 
     /**
-     * Constructs a Cycles-gated wrapper around a Spring AI ToolCallback with an
-     * explicit subject resolver. Preferred constructor — invoked via the auto-configured
-     * {@link CyclesToolGate#wrap}.
+     * Constructs a Cycles-gated wrapper around a Spring AI ToolCallback with explicit
+     * subject-resolver and commit-retry strategies. Preferred constructor — invoked
+     * via the auto-configured {@link CyclesToolGate#wrap} so failed tool commits share
+     * the Spring-managed durable retry engine.
+     *
+     * @param delegate           the tool callback to wrap.
+     * @param cyclesClient       the Cycles HTTP client.
+     * @param cyclesProperties   SDK-level properties.
+     * @param springAiProperties Spring AI integration properties.
+     * @param subjectResolver    resolves the Cycles subject. Invoked with {@code null}
+     *                           for the {@code ChatClientRequest} parameter because tool
+     *                           callbacks don't carry one.
+     * @param retryEngine        durable retry engine that owns failed commits.
+     */
+    public CyclesToolCallback(ToolCallback delegate,
+                              CyclesClient cyclesClient,
+                              CyclesProperties cyclesProperties,
+                              CyclesSpringAiProperties springAiProperties,
+                              SubjectResolver subjectResolver,
+                              CommitRetryEngine retryEngine) {
+        this.delegate = delegate;
+        this.lifecycle = new CyclesBudgetLifecycle(cyclesClient, cyclesProperties,
+                springAiProperties, subjectResolver, new CharsPerTokenEstimator(), retryEngine);
+        this.springAiProperties = springAiProperties;
+    }
+
+    /**
+     * Backward-compatible constructor — creates a private durable retry engine
+     * internally (see {@link CyclesBudgetLifecycle}). Prefer the engine-injecting
+     * constructor in Spring apps.
      *
      * @param delegate           the tool callback to wrap.
      * @param cyclesClient       the Cycles HTTP client.
@@ -117,17 +146,17 @@ public class CyclesToolCallback implements ToolCallback {
      */
     private String gateInvocation(ToolInvocation invocation) {
         String actionName = springAiProperties.getToolActionNamePrefix() + delegate.getToolDefinition().name();
-        String reservationId = lifecycle.reserveOrFailOpen(null,
+        CyclesBudgetLifecycle.ActiveReservation reservation = lifecycle.reserveOrFailOpen(null,
                 springAiProperties.getToolActionKind(), actionName);
         try {
             String result = invocation.run();
-            if (reservationId != null) {
-                lifecycle.commitOrFailOpen(reservationId, null);
+            if (reservation != null) {
+                lifecycle.commitOrFailOpen(reservation, null);
             }
             return result;
         } catch (RuntimeException invocationFailure) {
-            if (reservationId != null) {
-                lifecycle.releaseQuietly(reservationId,
+            if (reservation != null) {
+                lifecycle.releaseQuietly(reservation.id(),
                         "tool-call-failed: " + invocationFailure.getClass().getSimpleName());
             }
             throw invocationFailure;

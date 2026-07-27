@@ -1,6 +1,6 @@
 [![CI](https://github.com/runcycles/cycles-spring-ai-starter/actions/workflows/ci.yml/badge.svg)](https://github.com/runcycles/cycles-spring-ai-starter/actions)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/runcycles/cycles-spring-ai-starter/actions)
+[![Coverage](https://img.shields.io/badge/coverage-98%25-brightgreen)](https://github.com/runcycles/cycles-spring-ai-starter/actions)
 
 # Cycles Spring AI Starter — runtime authority for Spring AI agents
 
@@ -16,7 +16,7 @@ Per-call lifecycle: **reserve → call → commit** on success, **reserve → ca
 <dependency>
     <groupId>io.runcycles</groupId>
     <artifactId>cycles-spring-ai-starter</artifactId>
-    <version>0.3.1</version>
+    <version>0.4.0</version>
 </dependency>
 ```
 
@@ -40,7 +40,8 @@ cycles.spring-ai:
   estimate-unit: USD_MICROCENTS        # also accepts TOKENS, CREDITS, RISK_POINTS
   action-kind: llm.chat
   action-name: spring-ai-chat
-  fail-open: false                     # true = log + proceed on transport errors
+  fail-open: false                     # true = log + proceed on RESERVE transport errors
+                                       # (failed COMMITs are retried durably in both modes)
 ```
 
 The first block (`cycles.*`) is owned by the underlying `cycles-client-java-spring` SDK; the second block (`cycles.spring-ai.*`) is owned by this starter.
@@ -122,13 +123,24 @@ The bean is auto-configured but NOT auto-attached — applying a convention has 
 | Commit on success | `POST /v1/reservations/{id}/commit` with actual amount | After `chain.nextCall` returns |
 | Release on error | `POST /v1/reservations/{id}/release` with reason | Catch block re-throws original after release |
 
+**Commit durability (0.4.0+).** A commit records spend that already happened, so a failed commit is never silently dropped or thrown away. The starter classifies commit failures the same way as `cycles-client-java-spring` 0.3.0's lifecycle service and hands them to the shared `CommitRetryEngine` (journal-first, exponential backoff, flushed on Spring shutdown):
+
+| Commit outcome | Behavior |
+|---|---|
+| 2xx | Success. |
+| Transport error / 5xx / 429 (incl. bodyless) / retryable error code | Scheduled on the retry engine (429's `Retry-After` honored). Never thrown — in BOTH `fail-open` modes; durability owns transient failures now. |
+| 401 / 403 | Error-logged and journaled for replay after credentials are fixed. Never released, never thrown. |
+| `RESERVATION_EXPIRED` | The server already returned the reserved budget to the pool; the spend is recovered via `POST /v1/events` (same idempotency key, `recovered_reservation_id` + `recovery_reason` metadata, original subject/action). |
+| `RESERVATION_FINALIZED` / `IDEMPOTENCY_MISMATCH` | Warn only. |
+| Other genuine 4xx rejections | The only place `fail-open` still applies to commits: fail-open logs, fail-closed throws `IllegalStateException`. |
+
 **Streaming chat** (`chatClient.prompt(...).stream()`) — same lifecycle adapted to the reactive signal model. The entire pipeline is wrapped in `Flux.defer(...)` so reservation state is per-subscription (no leak when the Flux is assembled but never subscribed; resubscribing gets a fresh reservation):
 
 | Step | Cycles wire call | Reactor signal |
 |---|---|---|
 | Pre-stream | `POST /v1/reservations` | On subscription (inside `Flux.defer`). Reservation failures (denial, transport) surface as `onError` to the subscriber — the reactive-idiomatic shape; handle via `.onErrorResume(...)`. |
 | Stream | (advisor passes chunks through, tracking last seen) | `doOnNext(lastResponse::set)` |
-| Commit on complete | `POST /v1/reservations/{id}/commit` with usage from the last chunk | `concatWith(Mono.defer(...))` after the upstream emits `onComplete`. Commit runs **before** the subscriber observes terminal completion, so a fail-closed commit failure correctly surfaces as `onError` (the way the non-streaming advisor fails the call). |
+| Commit on complete | `POST /v1/reservations/{id}/commit` with usage from the last chunk | `concatWith(Mono.defer(...))` after the upstream emits `onComplete`. Commit runs **before** the subscriber observes terminal completion. Since 0.4.0 only a genuine 4xx rejection in fail-closed mode surfaces as `onError`; transient/auth/expired commit failures go to the durable retry engine and the stream completes normally. |
 | Release on error | `POST /v1/reservations/{id}/release` | `doOnError` |
 | Release on cancel | `POST /v1/reservations/{id}/release` | `doOnCancel` |
 | Release on assembly failure | `POST /v1/reservations/{id}/release` | If `chain.nextStream(request)` throws synchronously after we reserved, we release and re-throw. |
@@ -149,6 +161,14 @@ Both chat advisors are registered automatically via Spring AI's `ChatClientCusto
 - **Java**: 21+
 - **Spring Boot**: 3.5.x
 - **Spring AI**: 1.0.x (BOM-managed; tested compatible with 1.1.x via the post-scaffold Dependabot bump to 1.1.6)
+
+## What's new in `0.4.0`
+
+Fixes the commit-durability defect: previously a failed commit was one synchronous attempt — silently swallowed under `fail-open=true` (spend under-counted) or thrown under `fail-open=false` — and `RESERVATION_EXPIRED` was dropped like any other failure.
+
+- ✅ **Durable commit handling** — adopts the journaled `CommitRetryEngine` machinery from `cycles-client-java-spring` **0.3.0** (cycles-spring-boot-starter PR #109). Transient commit failures (transport, 5xx, 429 with `Retry-After`, retryable codes) and 401/403 are journaled to disk and retried in the background with exponential backoff; pending commits survive JVM restarts and replay on the next run. See the "Commit durability" table above.
+- ✅ **`RESERVATION_EXPIRED` spend recovery** — when the reservation expired before the commit landed, the spend is recorded via `POST /v1/events` with the original subject/action, the commit's idempotency key, and recovery markers in metadata.
+- ✅ **Shared engine bean** — the SDK's auto-configured `CommitRetryEngine` is reused when present (one journal identity, one retry thread across `@Cycles` methods, chat advisors, and gated tools); the Spring AI auto-config registers a fallback engine bean otherwise. Spring's `DisposableBean` flush drains in-flight retries on shutdown, bounded by `cycles.retry.flush-timeout`.
 
 ## What's new in `0.3.0`
 
@@ -178,7 +198,7 @@ All known limitations from v0.1.0 are addressed:
 | `cycles.spring-ai.estimate-unit` | `USD_MICROCENTS` | Unit for the estimate. Cycles `Unit` enum values: `USD_MICROCENTS`, `TOKENS`, `CREDITS`, `RISK_POINTS`. |
 | `cycles.spring-ai.action-kind` | `llm.chat` | Action.kind label reported to Cycles. |
 | `cycles.spring-ai.action-name` | `spring-ai-chat` | Action.name label reported to Cycles. |
-| `cycles.spring-ai.fail-open` | `false` | When true, transport errors against Cycles are logged and the LLM call proceeds. Budget denials are always surfaced. |
+| `cycles.spring-ai.fail-open` | `false` | When true, RESERVE transport errors against Cycles are logged and the LLM call proceeds. Budget denials are always surfaced. Since 0.4.0 this only governs the reserve side and genuine 4xx commit rejections — transient/auth/expired commit failures are retried durably by the `CommitRetryEngine` in both modes (see "Commit durability"). Retry/journal knobs live under `cycles.retry.*` / `cycles.journal.*` (owned by `cycles-client-java-spring`). |
 | `cycles.spring-ai.input-cost-per-token` | `0` | Per-input-token cost in the estimate unit. When set (with `output-cost-per-token`), the advisor commits actual token-based cost instead of the estimate. Example: `250` (= $2.50/1M tokens for OpenAI gpt-4o input, since 1 USD = 100,000,000 USD_MICROCENTS). |
 | `cycles.spring-ai.output-cost-per-token` | `0` | Per-output-token cost. Example: `1000` (= $10.00/1M tokens for OpenAI gpt-4o output). |
 | `cycles.spring-ai.estimate-from-prompt` | `false` | When `true` and at least one cost-per-token rate is set, sizes the pre-call reservation from the prompt char count (`chars / 4` × combined rate). Falls back to `default-estimate` when the prompt is empty or rates are zero. |
