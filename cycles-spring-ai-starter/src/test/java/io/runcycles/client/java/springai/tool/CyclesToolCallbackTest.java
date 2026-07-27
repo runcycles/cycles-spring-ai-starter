@@ -6,8 +6,10 @@ import io.runcycles.client.java.spring.model.CommitRequest;
 import io.runcycles.client.java.spring.model.CyclesResponse;
 import io.runcycles.client.java.spring.model.ReleaseRequest;
 import io.runcycles.client.java.spring.model.ReservationCreateRequest;
+import io.runcycles.client.java.spring.retry.CommitRetryEngine;
 import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
+import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -24,12 +26,16 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -184,6 +190,116 @@ class CyclesToolCallbackTest {
 
         verify(cyclesClient).releaseReservation(eq("res-tool-fail"), any(ReleaseRequest.class));
         verify(cyclesClient, never()).commitReservation(anyString(), any(CommitRequest.class));
+    }
+
+    // ---- Durable commit handling (engine-injecting constructor) ----------
+
+    @Test
+    void toolCommitTransientFailureSchedulesRetryOnInjectedEngine() {
+        // The engine-injecting constructor (used by the auto-configured CyclesToolGate)
+        // routes failed tool commits to the shared durable retry engine instead of
+        // dropping (fail-open) or throwing (fail-closed).
+        CommitRetryEngine engine = mock(CommitRetryEngine.class);
+        CyclesToolCallback durableTool = new CyclesToolCallback(delegate, cyclesClient,
+                cyclesProperties, springAiProperties,
+                new PropertiesSubjectResolver(cyclesProperties), engine);
+
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-tool-durable"));
+        when(delegate.call("x")).thenReturn("y");
+        when(cyclesClient.commitReservation(eq("res-tool-durable"), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(503, "unavailable", Map.of()));
+
+        String result = durableTool.call("x");
+
+        assertThat(result).isEqualTo("y");
+        verify(engine).schedule(eq("res-tool-durable"), anyMap(), anyMap(), isNull());
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
+    @Test
+    void toolCommitOnExpiredReservationSchedulesEventFallback() {
+        CommitRetryEngine engine = mock(CommitRetryEngine.class);
+        CyclesToolCallback durableTool = new CyclesToolCallback(delegate, cyclesClient,
+                cyclesProperties, springAiProperties,
+                new PropertiesSubjectResolver(cyclesProperties), engine);
+
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-tool-expired"));
+        when(delegate.call("x")).thenReturn("y");
+        when(cyclesClient.commitReservation(eq("res-tool-expired"), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(410, "gone",
+                        Map.of("error", "RESERVATION_EXPIRED")));
+
+        String result = durableTool.call("x");
+
+        assertThat(result).isEqualTo("y");
+        verify(engine).scheduleEvent(eq("res-tool-expired"), anyMap());
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
+    }
+
+    // ---- Genuine 4xx commit rejection: NOT a tool failure -----------------
+
+    @Test
+    void toolCommitGenuine4xxFailClosedReleasesOnceWithCommitRejectedReasonAndPropagates() {
+        // The commit runs OUTSIDE the invocation try/catch: a genuine 4xx rejection
+        // under fail-closed propagates as a commit failure (IllegalStateException),
+        // not as a mislabeled "tool-call-failed" invocation failure. The lifecycle
+        // has already released the rejected reservation with the commit_rejected
+        // reason — exactly ONE release, never a second "tool-call-failed" one.
+        CommitRetryEngine engine = mock(CommitRetryEngine.class);
+        CyclesToolCallback durableTool = new CyclesToolCallback(delegate, cyclesClient,
+                cyclesProperties, springAiProperties,
+                new PropertiesSubjectResolver(cyclesProperties), engine);
+
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-tool-rejected"));
+        when(delegate.call("x")).thenReturn("tool-result");
+        when(cyclesClient.commitReservation(eq("res-tool-rejected"), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(422, "unit mismatch",
+                        Map.of("error", "UNIT_MISMATCH")));
+        when(cyclesClient.releaseReservation(eq("res-tool-rejected"), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        assertThatThrownBy(() -> durableTool.call("x"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("commit HTTP failure");
+
+        ArgumentCaptor<ReleaseRequest> release = ArgumentCaptor.forClass(ReleaseRequest.class);
+        verify(cyclesClient, times(1)).releaseReservation(eq("res-tool-rejected"), release.capture());
+        assertThat(release.getValue().getReason()).isEqualTo("commit_rejected_UNIT_MISMATCH");
+        // The tool DID run; its result is lost only because fail-closed escalates the
+        // rejected commit. No misleading tool-call-failed release, no engine involvement.
+        verify(delegate).call("x");
+        verifyNoInteractions(engine);
+    }
+
+    @Test
+    void toolCommitGenuine4xxFailOpenReleasesWithCommitRejectedReasonAndReturnsResult() {
+        // fail-open: the lifecycle releases with commit_rejected_<code>, logs, and the
+        // successful tool result is returned to the model — NOT discarded.
+        springAiProperties.setFailOpen(true);
+        CommitRetryEngine engine = mock(CommitRetryEngine.class);
+        CyclesToolCallback durableTool = new CyclesToolCallback(delegate, cyclesClient,
+                cyclesProperties, springAiProperties,
+                new PropertiesSubjectResolver(cyclesProperties), engine);
+
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-tool-rejected-open"));
+        when(delegate.call("x")).thenReturn("tool-result");
+        when(cyclesClient.commitReservation(eq("res-tool-rejected-open"), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(422, "unit mismatch",
+                        Map.of("error", "UNIT_MISMATCH")));
+        when(cyclesClient.releaseReservation(eq("res-tool-rejected-open"), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        String result = durableTool.call("x");
+
+        assertThat(result).isEqualTo("tool-result");
+        ArgumentCaptor<ReleaseRequest> release = ArgumentCaptor.forClass(ReleaseRequest.class);
+        verify(cyclesClient, times(1)).releaseReservation(eq("res-tool-rejected-open"), release.capture());
+        assertThat(release.getValue().getReason()).isEqualTo("commit_rejected_UNIT_MISMATCH");
+        verifyNoInteractions(engine);
     }
 
     // ---- Fail-open ------------------------------------------------------

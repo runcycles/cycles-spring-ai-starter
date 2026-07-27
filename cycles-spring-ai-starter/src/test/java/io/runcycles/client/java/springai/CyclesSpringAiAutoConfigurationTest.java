@@ -1,7 +1,10 @@
 package io.runcycles.client.java.springai;
 
+import io.runcycles.client.java.spring.autoconfigure.CyclesAutoConfiguration;
 import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
+import io.runcycles.client.java.spring.retry.CommitRetryEngine;
+import io.runcycles.client.java.spring.retry.JournaledCommitRetryEngine;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetAdvisor;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiAutoConfiguration;
@@ -52,6 +55,69 @@ class CyclesSpringAiAutoConfigurationTest {
             CyclesSpringAiProperties props = ctx.getBean(CyclesSpringAiProperties.class);
             assertThat(props.isEnabled()).isTrue();
         });
+    }
+
+    @Test
+    void wiresDurableCommitRetryEngineFallback() {
+        // In contexts where the SDK's CyclesAutoConfiguration is not active (e.g. a
+        // user-supplied CyclesClient bean), the Spring AI auto-config registers the
+        // journal-backed engine itself so failed commits are still durable — and
+        // Spring lifecycle handles the DisposableBean flush on shutdown. The test
+        // CyclesProperties carry no base-url/identity, so the engine's journal is
+        // disabled and nothing touches the real user.home journal directory.
+        contextRunner.run(ctx -> {
+            assertThat(ctx).hasSingleBean(CommitRetryEngine.class);
+            assertThat(ctx.getBean(CommitRetryEngine.class))
+                    .isInstanceOf(JournaledCommitRetryEngine.class);
+        });
+    }
+
+    @Test
+    void sdkEngineWinsWhenBothAutoConfigurationsActive() {
+        // Real-world wiring: BOTH the SDK's CyclesAutoConfiguration and this starter's
+        // auto-configuration are on the classpath. @AutoConfigureAfter guarantees the
+        // SDK's engine bean (named "retryEngine") registers first, so the starter's
+        // fallback ("cyclesCommitRetryEngine") backs off via @ConditionalOnMissingBean:
+        // exactly ONE CommitRetryEngine in the context, and it is the SDK-provided
+        // bean — single journal identity, single retry thread for @Cycles methods,
+        // chat advisors, and tool callbacks alike.
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        CyclesAutoConfiguration.class, CyclesSpringAiAutoConfiguration.class))
+                .withPropertyValues(
+                        // Satisfy the SDK's cyclesWebClient preconditions (no network
+                        // I/O happens at context refresh)...
+                        "cycles.base-url=http://localhost:1",
+                        "cycles.api-key=test-key",
+                        // ...and keep the real engine's journal off disk: a unit test
+                        // must never write under the developer's user home.
+                        "cycles.journal.enabled=false")
+                .run(ctx -> {
+                    assertThat(ctx).hasNotFailed();
+                    assertThat(ctx).hasSingleBean(CommitRetryEngine.class);
+                    assertThat(ctx).hasBean("retryEngine");
+                    assertThat(ctx).doesNotHaveBean("cyclesCommitRetryEngine");
+                    assertThat(ctx.getBean(CommitRetryEngine.class))
+                            .isInstanceOf(JournaledCommitRetryEngine.class)
+                            .isSameAs(ctx.getBean("retryEngine"));
+                    // Starter beans wire against the SDK's engine + client.
+                    assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
+                });
+    }
+
+    @Test
+    void userProvidedCommitRetryEngineOverridesFallback() {
+        CommitRetryEngine userEngine = mock(CommitRetryEngine.class);
+        contextRunner
+                .withBean("userRetryEngine", CommitRetryEngine.class, () -> userEngine)
+                .run(ctx -> {
+                    assertThat(ctx).hasSingleBean(CommitRetryEngine.class);
+                    assertThat(ctx.getBean(CommitRetryEngine.class)).isSameAs(userEngine);
+                    // Advisors still wire — they just take the user's engine.
+                    assertThat(ctx).hasSingleBean(CyclesBudgetAdvisor.class);
+                    assertThat(ctx).hasSingleBean(CyclesBudgetStreamAdvisor.class);
+                });
     }
 
     @Test

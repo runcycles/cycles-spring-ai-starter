@@ -5,6 +5,45 @@ All notable changes to `cycles-spring-ai-starter` will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-07-27
+
+Fixes the commit-durability defect: `CyclesBudgetLifecycle.commitOrFailOpen(...)` made ONE synchronous commit attempt — under the default `fail-open=true`-style handling any failure was logged and swallowed (spend silently under-counted), under `fail-open=false` it threw `IllegalStateException` — and it never inspected error codes, so `RESERVATION_EXPIRED` (where the server has ALREADY returned the reserved budget to the pool) was dropped like any other failure. A commit records spend that already happened; dropping it is an accounting bug.
+
+### Fixed
+
+- **Durable commit handling.** The commit path now mirrors the fleet template in `cycles-client-java-spring` 0.3.0's `CyclesLifecycleService.handleCommit` (cycles-spring-boot-starter PR #109, python-SDK PR #89 lineage), delegating failures to the library's `retry.CommitRetryEngine` / `JournaledCommitRetryEngine` (journal-first on-disk per-identity journal with replay, exponential backoff on a daemon scheduler, `DisposableBean` flush on shutdown):
+  - 2xx → success.
+  - Transport failure (thrown or `transportError` response) / 5xx / 429 (including bodyless) / retryable error code → `engine.schedule(reservationId, commitBody, eventFallbackBody, retryAfterMs)` — 429's `Retry-After` is passed through. **No throw, no silent drop, in BOTH fail-open and fail-closed modes** — durability owns transient commit failures now.
+  - 401/403 → error log + schedule for replay (fix credentials, restart). Never released, never thrown.
+  - `RESERVATION_EXPIRED` → warn + `engine.scheduleEvent(...)`: spend recovered via `POST /v1/events` with the commit's idempotency key (exactly-once across restarts), the reservation-time subject/action, `metadata.recovered_reservation_id` + `metadata.recovery_reason=commit_after_reservation_expired`, and no `overage_policy` (spec default ALLOW_IF_AVAILABLE never rejects — right bias for spend that already happened).
+  - `RESERVATION_EXPIRED` also triggers on a **raw 410 status** whose body carries no parseable error code (bodyless/mangled 410) — matching the SDK; still `scheduleEvent`, never the genuine-4xx policy (fleet decision D1).
+  - `RESERVATION_FINALIZED` / `IDEMPOTENCY_MISMATCH` → warn only.
+  - Other genuine 4xx rejections → the lifecycle **releases the rejected reservation itself** (best-effort, reason `commit_rejected_<code>`, matching the SDK's `CyclesLifecycleService`), THEN applies the ONLY remaining place the historical fail-open/fail-closed policy holds (fail-open: log; fail-closed: throw). This harmonizes all three commit sites: the tool callback's commit moved OUT of its invocation try/catch, so a fail-closed rejection now propagates as a commit failure instead of being caught as a "tool-call-failed" invocation failure that double-released with a misleading reason and discarded the successful tool result; the call advisor and stream advisor need no release of their own on that exception (previously the call advisor threw without releasing, and the stream advisor's commit `Mono.error` bypassed its upstream `doOnError` release). Reserve-side fail-open semantics are unchanged.
+  - Any other non-2xx status outside every known class (e.g. a 3xx from a misconfigured proxy) → **warn only** — no throw, no schedule, no release (previously fell into the genuine-4xx policy and could throw under fail-closed).
+
+### Added
+
+- **`CommitRetryEngine` wiring.** The auto-configuration injects the SDK's auto-configured engine bean into both advisors and the tool gate, and registers a fallback `JournaledCommitRetryEngine` bean (`@ConditionalOnMissingBean`) for contexts where `CyclesAutoConfiguration` isn't active. One shared engine per app: single journal identity, single retry thread, Spring lifecycle flush on shutdown (`cycles.retry.flush-timeout`).
+- **`CyclesBudgetLifecycle.ActiveReservation`** — `reserveOrFailOpen(...)` now returns this record (id + originating `ReservationCreateRequest`) instead of a bare id, threading the reservation-time subject/action to the commit site for the event fallback body. `commitOrFailOpen(ActiveReservation, ChatClientResponse)` takes it. `CyclesBudgetLifecycle` is documented internal API; the advisor/tool user-facing surface is unchanged.
+- New engine-injecting constructors on `CyclesBudgetAdvisor`, `CyclesBudgetStreamAdvisor`, `CyclesToolCallback`, `CyclesToolGate`, and `CyclesBudgetLifecycle` (preferred; used by the auto-config). All previous constructors are preserved and now build a private `JournaledCommitRetryEngine` internally, so direct-instantiation callers get durability by default too.
+
+### Behavior note
+
+- **The preserved (now `@Deprecated`) constructors build a LIVE journaled commit-retry engine per instance.** With production-shaped `CyclesProperties` (base-url + api-key/tenant set) that engine writes an on-disk journal under the real user home (`~/.runcycles`) and performs a once-per-JVM startup replay of pending records — in downstream unit tests, a mocked `CyclesClient` could replay and discard real pending commit records. Tests must use the engine-injecting constructors with a mock `CommitRetryEngine`. The journal is deliberately NOT disabled on these constructors: durability-by-default is the point for production direct-instantiation users. Hardening in the same release: `CyclesToolGate`'s deprecated constructors now build exactly ONE engine per gate instance (previously each `wrap()` call built its own engine — one journal replay claim and retry thread per wrapped tool).
+
+### Changed
+
+- **Streaming commit failures no longer error the stream** except for genuine 4xx rejections in fail-closed mode — transient/auth/expired failures are scheduled on the engine and the stream completes normally (previously any fail-closed commit failure surfaced as `onError`).
+- Docs: README "Commit durability" table, `fail-open` property docs (now reserve-side + genuine 4xx commit rejections only), `CyclesSpringAiProperties.failOpen` javadoc.
+
+### Dependencies
+
+- `io.runcycles:cycles-client-java-spring` **0.2.5 → 0.3.0** (provides `retry.CommitRetryEngine`, `retry.JournaledCommitRetryEngine`, the `journal` package, and `CyclesResponse.getRetryAfterMs()`). NOTE: 0.3.0 ships from cycles-spring-boot-starter PR #109 — until that PR merges and releases to Maven Central, this version resolves only from a local `~/.m2` install.
+
+### Verification
+
+`mvn -B verify` → BUILD SUCCESS, 183 tests (up from 152), jacoco bundle 97.93% instruction / 98.21% branch (gate ≥ 95%). New coverage: transient→schedule (both fail modes), 429 with/without `Retry-After`, retryable-unknown 4xx code, 401/403 replay, expired→event fallback body shape (idempotency-key reuse, recovery markers, subject/action passthrough incl. custom `SubjectResolver`), raw-410-with-unparseable-body→event fallback, FINALIZED/IDEMPOTENCY_MISMATCH warn-only, genuine-4xx `commit_rejected_<code>` release-then-policy at all three commit sites (single release, no double-release, correct reason; stream: `onError` surfaces), non-4xx unclassifiable (302) warn-only, dual-autoconfig wiring (SDK's `CyclesAutoConfiguration` + this starter's → exactly one `CommitRetryEngine`, the SDK's `retryEngine` bean), per-gate single engine on the deprecated `CyclesToolGate` constructors, engine bean wiring/override. All engine interactions in tests use a mocked `CommitRetryEngine`; contexts that build a real engine carry no `cycles.base-url` (or set `cycles.journal.enabled=false`), so the journal is disabled and never touches the real user home.
+
 ## [0.3.1] — 2026-05-12
 
 Documentation-only patch release. No code changes. v0.3.1 == v0.3.0 functionally; cut to ship the corrected javadoc + README config-reference examples on Maven Central.

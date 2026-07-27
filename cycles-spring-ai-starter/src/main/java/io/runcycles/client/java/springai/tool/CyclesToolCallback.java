@@ -2,8 +2,10 @@ package io.runcycles.client.java.springai.tool;
 
 import io.runcycles.client.java.spring.client.CyclesClient;
 import io.runcycles.client.java.spring.config.CyclesProperties;
+import io.runcycles.client.java.spring.retry.CommitRetryEngine;
 import io.runcycles.client.java.springai.CyclesBudgetDeniedException;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetLifecycle;
+import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import io.runcycles.client.java.springai.subject.SubjectResolver;
 import org.springframework.ai.chat.model.ToolContext;
@@ -46,9 +48,10 @@ public class CyclesToolCallback implements ToolCallback {
     private final CyclesSpringAiProperties springAiProperties;
 
     /**
-     * Constructs a Cycles-gated wrapper around a Spring AI ToolCallback with an
-     * explicit subject resolver. Preferred constructor — invoked via the auto-configured
-     * {@link CyclesToolGate#wrap}.
+     * Constructs a Cycles-gated wrapper around a Spring AI ToolCallback with explicit
+     * subject-resolver and commit-retry strategies. Preferred constructor — invoked
+     * via the auto-configured {@link CyclesToolGate#wrap} so failed tool commits share
+     * the Spring-managed durable retry engine.
      *
      * @param delegate           the tool callback to wrap.
      * @param cyclesClient       the Cycles HTTP client.
@@ -57,7 +60,42 @@ public class CyclesToolCallback implements ToolCallback {
      * @param subjectResolver    resolves the Cycles subject. Invoked with {@code null}
      *                           for the {@code ChatClientRequest} parameter because tool
      *                           callbacks don't carry one.
+     * @param retryEngine        durable retry engine that owns failed commits.
      */
+    public CyclesToolCallback(ToolCallback delegate,
+                              CyclesClient cyclesClient,
+                              CyclesProperties cyclesProperties,
+                              CyclesSpringAiProperties springAiProperties,
+                              SubjectResolver subjectResolver,
+                              CommitRetryEngine retryEngine) {
+        this.delegate = delegate;
+        this.lifecycle = new CyclesBudgetLifecycle(cyclesClient, cyclesProperties,
+                springAiProperties, subjectResolver, new CharsPerTokenEstimator(), retryEngine);
+        this.springAiProperties = springAiProperties;
+    }
+
+    /**
+     * Backward-compatible constructor — creates a private durable retry engine
+     * internally (see {@link CyclesBudgetLifecycle}). Prefer the engine-injecting
+     * constructor in Spring apps.
+     *
+     * @param delegate           the tool callback to wrap.
+     * @param cyclesClient       the Cycles HTTP client.
+     * @param cyclesProperties   SDK-level properties.
+     * @param springAiProperties Spring AI integration properties.
+     * @param subjectResolver    resolves the Cycles subject. Invoked with {@code null}
+     *                           for the {@code ChatClientRequest} parameter because tool
+     *                           callbacks don't carry one.
+     * @deprecated <strong>Constructs a LIVE journaled commit-retry engine per
+     *             instance</strong>: with production-shaped {@code CyclesProperties}
+     *             it writes an on-disk journal under the real user home
+     *             ({@code ~/.runcycles}) and performs a once-per-JVM startup replay
+     *             of pending records — in unit tests a mocked client could replay
+     *             and discard real pending commits. Tests should use the
+     *             engine-injecting constructor with a mock
+     *             {@code CommitRetryEngine}.
+     */
+    @Deprecated
     public CyclesToolCallback(ToolCallback delegate,
                               CyclesClient cyclesClient,
                               CyclesProperties cyclesProperties,
@@ -76,7 +114,13 @@ public class CyclesToolCallback implements ToolCallback {
      * @param cyclesClient       the Cycles HTTP client.
      * @param cyclesProperties   SDK-level properties.
      * @param springAiProperties Spring AI integration properties.
+     * @deprecated <strong>Constructs a LIVE journaled commit-retry engine per
+     *             instance</strong> (writes to {@code ~/.runcycles}, performs a
+     *             once-per-JVM startup replay with production-shaped properties).
+     *             Tests should use the engine-injecting constructor with a mock
+     *             {@code CommitRetryEngine}.
      */
+    @Deprecated
     public CyclesToolCallback(ToolCallback delegate,
                               CyclesClient cyclesClient,
                               CyclesProperties cyclesProperties,
@@ -110,28 +154,38 @@ public class CyclesToolCallback implements ToolCallback {
      * Run the supplied tool invocation under a Cycles reservation.
      *
      * <p>Reserves before the invocation; commits on success (estimate-as-actual since
-     * tools don't return ChatResponse usage); releases on RuntimeException.
+     * tools don't return ChatResponse usage); releases on RuntimeException from the
+     * tool invocation itself.
+     *
+     * <p>The commit deliberately happens OUTSIDE the invocation try/catch: a commit
+     * failure is not a tool failure. The lifecycle owns commit-failure handling — it
+     * schedules transient failures on the retry engine and, for a genuine 4xx
+     * rejection, releases the reservation itself (reason {@code commit_rejected_<code>})
+     * before applying the fail-open/fail-closed policy. Catching the fail-closed
+     * {@link IllegalStateException} here would mislabel it as a tool-invocation
+     * failure and double-release with the wrong reason.
      *
      * <p>{@link CyclesBudgetDeniedException} is thrown synchronously when the Cycles
      * server denies the reservation — the wrapped tool is NOT invoked.
      */
     private String gateInvocation(ToolInvocation invocation) {
         String actionName = springAiProperties.getToolActionNamePrefix() + delegate.getToolDefinition().name();
-        String reservationId = lifecycle.reserveOrFailOpen(null,
+        CyclesBudgetLifecycle.ActiveReservation reservation = lifecycle.reserveOrFailOpen(null,
                 springAiProperties.getToolActionKind(), actionName);
+        String result;
         try {
-            String result = invocation.run();
-            if (reservationId != null) {
-                lifecycle.commitOrFailOpen(reservationId, null);
-            }
-            return result;
+            result = invocation.run();
         } catch (RuntimeException invocationFailure) {
-            if (reservationId != null) {
-                lifecycle.releaseQuietly(reservationId,
+            if (reservation != null) {
+                lifecycle.releaseQuietly(reservation.id(),
                         "tool-call-failed: " + invocationFailure.getClass().getSimpleName());
             }
             throw invocationFailure;
         }
+        if (reservation != null) {
+            lifecycle.commitOrFailOpen(reservation, null);
+        }
+        return result;
     }
 
     @FunctionalInterface

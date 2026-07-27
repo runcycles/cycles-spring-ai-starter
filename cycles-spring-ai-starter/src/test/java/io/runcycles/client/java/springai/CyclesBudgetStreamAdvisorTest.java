@@ -6,9 +6,11 @@ import io.runcycles.client.java.spring.model.CommitRequest;
 import io.runcycles.client.java.spring.model.CyclesResponse;
 import io.runcycles.client.java.spring.model.ReleaseRequest;
 import io.runcycles.client.java.spring.model.ReservationCreateRequest;
+import io.runcycles.client.java.spring.retry.CommitRetryEngine;
 import io.runcycles.client.java.springai.advisor.CyclesBudgetStreamAdvisor;
 import io.runcycles.client.java.springai.autoconfigure.CyclesSpringAiProperties;
 import io.runcycles.client.java.springai.subject.PropertiesSubjectResolver;
+import io.runcycles.client.java.springai.tokenizer.CharsPerTokenEstimator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -32,10 +34,13 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -53,6 +58,7 @@ class CyclesBudgetStreamAdvisorTest {
     @Mock ChatClientRequest request;
     @Mock ChatClientResponse chunk1;
     @Mock ChatClientResponse chunk2;
+    @Mock CommitRetryEngine retryEngine;
 
     private CyclesProperties cyclesProperties;
     private CyclesSpringAiProperties springAiProperties;
@@ -67,7 +73,11 @@ class CyclesBudgetStreamAdvisorTest {
 
         springAiProperties = new CyclesSpringAiProperties();
 
-        advisor = new CyclesBudgetStreamAdvisor(cyclesClient, cyclesProperties, springAiProperties);
+        // Mocked retry engine: commit-failure tests verify durable scheduling without
+        // a real background executor or journal.
+        advisor = new CyclesBudgetStreamAdvisor(cyclesClient, cyclesProperties, springAiProperties,
+                new PropertiesSubjectResolver(cyclesProperties), new CharsPerTokenEstimator(),
+                retryEngine);
     }
 
     // ---- Metadata --------------------------------------------------------
@@ -306,11 +316,10 @@ class CyclesBudgetStreamAdvisorTest {
     }
 
     @Test
-    void commitFailureOnStreamCompleteSurfacesAsOnErrorWhenFailClosed() {
-        // Pre-refactor bug: commit ran in doFinally, which fires AFTER onComplete has been
-        // delivered to the subscriber. A commit failure in fail-closed mode couldn't fail
-        // the stream the way the non-streaming advisor fails its call. concatWith puts
-        // the commit ON the timeline so the failure surfaces correctly.
+    void commitTransportFailureOnStreamCompleteSchedulesRetryEvenWhenFailClosed() {
+        // Since durable commit handling, a transient commit failure no longer fails
+        // the stream in fail-closed mode: the spend already happened, so the failed
+        // commit is handed to the retry engine and the stream completes normally.
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(reservationAllow("res-commit-fail"));
         when(chain.nextStream(request)).thenReturn(Flux.just(chunk1));
@@ -319,17 +328,16 @@ class CyclesBudgetStreamAdvisorTest {
 
         StepVerifier.create(advisor.adviseStream(request, chain))
                 .expectNext(chunk1)
-                .expectErrorSatisfies(error -> {
-                    assertThat(error).isInstanceOf(IllegalStateException.class);
-                    assertThat(error.getMessage()).contains("commit failed");
-                })
-                .verify();
+                .verifyComplete();
+
+        verify(retryEngine).schedule(eq("res-commit-fail"), anyMap(), anyMap(), isNull());
+        verify(cyclesClient, never()).releaseReservation(anyString(), any(ReleaseRequest.class));
     }
 
     @Test
-    void commitFailureOnStreamCompleteSwallowedWhenFailOpen() {
-        // fail-open=true: commit failures are logged and the stream completes normally
-        // (no onError to the subscriber).
+    void commitTransportFailureOnStreamCompleteSchedulesRetryWhenFailOpen() {
+        // fail-open=true: pre-0.4.0 the failed commit was logged and silently dropped.
+        // Durability owns it now — scheduled on the retry engine, stream completes.
         springAiProperties.setFailOpen(true);
         when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
                 .thenReturn(reservationAllow("res-commit-open"));
@@ -340,6 +348,40 @@ class CyclesBudgetStreamAdvisorTest {
         StepVerifier.create(advisor.adviseStream(request, chain))
                 .expectNext(chunk1)
                 .verifyComplete();
+
+        verify(retryEngine).schedule(eq("res-commit-open"), anyMap(), anyMap(), isNull());
+    }
+
+    @Test
+    void commitGenuine4xxRejectionOnStreamCompleteSurfacesAsOnErrorWhenFailClosed() {
+        // The concatWith(Mono.defer(...)) shape still matters: a genuine 4xx rejection
+        // in fail-closed mode is the one remaining commit failure that throws, and it
+        // must surface as onError to the subscriber (not vanish in doFinally). The
+        // doOnError release hook is attached UPSTREAM of the commit Mono, so it does
+        // not fire for this error — correct, because the lifecycle already released
+        // the rejected reservation itself: exactly ONE release, with the
+        // commit_rejected reason (never a misleading chat-stream-failed one).
+        when(cyclesClient.createReservation(any(ReservationCreateRequest.class)))
+                .thenReturn(reservationAllow("res-commit-rejected"));
+        when(chain.nextStream(request)).thenReturn(Flux.just(chunk1));
+        when(cyclesClient.commitReservation(anyString(), any(CommitRequest.class)))
+                .thenReturn(CyclesResponse.httpError(400, "bad request",
+                        Map.of("error", "INVALID_REQUEST")));
+        when(cyclesClient.releaseReservation(eq("res-commit-rejected"), any(ReleaseRequest.class)))
+                .thenReturn(CyclesResponse.success(200, Map.of()));
+
+        StepVerifier.create(advisor.adviseStream(request, chain))
+                .expectNext(chunk1)
+                .expectErrorSatisfies(error -> {
+                    assertThat(error).isInstanceOf(IllegalStateException.class);
+                    assertThat(error.getMessage()).contains("commit HTTP failure");
+                })
+                .verify();
+
+        ArgumentCaptor<ReleaseRequest> release = ArgumentCaptor.forClass(ReleaseRequest.class);
+        verify(cyclesClient, times(1)).releaseReservation(eq("res-commit-rejected"), release.capture());
+        assertThat(release.getValue().getReason()).isEqualTo("commit_rejected_INVALID_REQUEST");
+        verifyNoInteractions(retryEngine);
     }
 
     @Test

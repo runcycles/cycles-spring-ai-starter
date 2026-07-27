@@ -47,7 +47,7 @@
              Maven Central doesn't carry stale <revision> metadata (the flatten plugin's
              resolveCiFriendliesOnly mode resolves <version> but preserves the
              <properties> block as-is). -->
-        <revision>0.3.1</revision>
+        <revision>0.4.0</revision>
 
         <java.version>21</java.version>
         <maven.compiler.source>21</maven.compiler.source>
@@ -123,7 +123,7 @@
         <dependency>
             <groupId>io.runcycles</groupId>
             <artifactId>cycles-client-java-spring</artifactId>
-            <version>0.2.5</version>
+            <version>0.3.0</version>
         </dependency>
 
         <!-- Spring Boot configuration metadata generator — gives IDE autocomplete
