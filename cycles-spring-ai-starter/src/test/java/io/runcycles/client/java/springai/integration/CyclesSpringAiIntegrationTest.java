@@ -21,6 +21,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -192,6 +193,10 @@ class CyclesSpringAiIntegrationTest {
             // Spying on the chat model lets us inspect the request that arrives at it
             // — by then, the advisor has put the reservation_id into context.
             ChatModel chatModel = mock(ChatModel.class);
+            // Spring AI 2 clones the model options while constructing the request.
+            // Real ChatModel implementations return non-null options; teach the
+            // Mockito fixture the same contract instead of relying on its null default.
+            when(chatModel.getOptions()).thenReturn(ChatOptions.builder().build());
             when(chatModel.call(any(Prompt.class)))
                     .thenAnswer(invocation -> stubResponse("ok"));
 

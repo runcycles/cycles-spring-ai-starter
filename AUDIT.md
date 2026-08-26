@@ -2,6 +2,16 @@
 
 This file tracks **protocol-surface** and **public-API** changes. Per the project rule (see [CLAUDE.md](./CLAUDE.md)): update this file whenever the public Java API, configuration property surface, or auto-configuration behavior changes.
 
+## Dependency compatibility — 2026-08-26
+
+- Upgraded the starter and demo from Spring AI 1.1.7 to 2.0.1 while retaining
+  Spring Boot 3.5.16 and Java 21 compatibility.
+- Updated the `ChatModel` integration-test fixture to return the non-null default
+  `ChatOptions` expected by Spring AI 2 request construction. Production model
+  behavior and the Cycles advisor implementation are unchanged.
+- No Cycles protocol, public Java API, configuration property, advisor ordering,
+  or auto-configuration behavior changed.
+
 ## What "protocol surface" means here
 
 The Spring AI starter does not own its own protocol — it delegates to the Cycles runtime via the existing client surface in [cycles-spring-boot-starter](https://github.com/runcycles/cycles-spring-boot-starter) (and through it, the [cycles-protocol](https://github.com/runcycles/cycles-protocol) YAML spec). Changes recorded here are limited to:
