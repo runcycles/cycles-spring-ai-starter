@@ -1,5 +1,9 @@
 # AUDIT.md — cycles-spring-ai-starter
 
+## 2026-10-14 — Dependency maintenance
+
+Consolidates Dependabot PRs #103, #99, and #101: SHA-pinned CodeQL SARIF uploader 4.38.3 and Scorecard 2.5.0, plus Netty BOM 4.2.19.Final in the demo. The starter already uses the same Netty release on main; the demo override now agrees. Netty release notes include HTTP parser and resource-consumption security fixes. Existing starter tests, coverage gates, and demo compilation must pass on the combined commit before merge. Protocol definitions and application source are unchanged.
+
 This file tracks **protocol-surface** and **public-API** changes. Per the project rule (see [CLAUDE.md](./CLAUDE.md)): update this file whenever the public Java API, configuration property surface, or auto-configuration behavior changes.
 
 ## Dependency compatibility — 2026-08-26
