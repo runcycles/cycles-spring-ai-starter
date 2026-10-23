@@ -1,5 +1,19 @@
 # AUDIT.md — cycles-spring-ai-starter
 
+## 2026-10-23 — Publishing and workflow dependency maintenance
+
+Consolidates Dependabot PRs #104, #105, and #106: Central publishing Maven plugin
+0.12.0, setup-java 6.1.0, and CodeQL SARIF uploader 4.39.0. Action pins were
+verified against upstream release tags. Plugin 0.12.0 fixes Maven 3.10
+staging metadata and adds opt-in skipUpload; existing publishing settings
+are preserved. Reference: https://central.sonatype.org/publish/publish-portal-maven/
+
+No runtime dependencies, public APIs, or YAML protocol contracts change.
+Existing Java 21 build, tests, coverage, and applicable recovery-conformance
+gates must pass on the consolidated commit before merge. Coverage thresholds
+remain unchanged. Publishing-profile validation does not upload artifacts.
+
+
 ## 2026-10-14 — Dependency maintenance
 
 Consolidates Dependabot PRs #103, #99, and #101: SHA-pinned CodeQL SARIF uploader 4.38.3 and Scorecard 2.5.0, plus Netty BOM 4.2.19.Final in the demo. The starter already uses the same Netty release on main; the demo override now agrees. Netty release notes include HTTP parser and resource-consumption security fixes. Existing starter tests, coverage gates, and demo compilation must pass on the combined commit before merge. Protocol definitions and application source are unchanged.
