@@ -1,5 +1,11 @@
 # AUDIT.md — cycles-spring-ai-starter
 
+## 2026-11-11 - Dependabot dependency review
+
+Combines PRs #118 and #115 (flatten-maven-plugin 1.9.0 in the starter and demo), #114 (setup-java 6.2.0), and #116 (CodeQL SARIF uploader 4.39.3). Action pins match upstream releases. The flatten plugin fixes CI-friendly property interpolation and now requires Maven 3.9+; README documents that build requirement. resolveCiFriendliesOnly, updatePomFile, revision handling, and Java 21 remain unchanged. Starter verify/install and demo compilation must pass together.
+
+Includes current main. Application source and authoritative YAML contracts are unchanged. Existing test, coverage (at least 95% lines), conformance, and security gates remain enabled and must pass before merge.
+
 ## 2026-10-23 — Publishing and workflow dependency maintenance
 
 Consolidates Dependabot PRs #104, #105, and #106: Central publishing Maven plugin
