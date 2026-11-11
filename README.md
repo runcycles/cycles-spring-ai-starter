@@ -371,6 +371,8 @@ cycles-spring-ai-starter/
 
 ## Development
 
+Building from source requires Java 21 and Maven 3.9.0 or later.
+
 ```bash
 mvn -B verify --file cycles-spring-ai-starter/pom.xml
 mvn -B install --file cycles-spring-ai-starter/pom.xml -DskipTests
