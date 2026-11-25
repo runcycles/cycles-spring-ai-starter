@@ -1,5 +1,9 @@
 # AUDIT.md — cycles-spring-ai-starter
 
+## 2026-11-25 - Dependabot dependency review
+
+PRs #123 and #126 align the demo and starter on the Spring AI 2.1.0 BOM. CI verifies and installs the starter on Java 21, then compiles the demo against it. PR #122 pins the Scorecard action to the upstream v2.6.0 commit.
+
 ## 2026-11-22 — Dependabot dependency review
 
 PR #120 updated `actions/setup-java` in the publishing workflow. The `d1374f8` pin matches upstream v6.3.0, and the workflow continues to select Temurin JDK 21.
